@@ -1,31 +1,149 @@
-# kototech-aug-hackathon-team3-api
+# 空き家活用アドバイザー API
 
 [`kotonara-tech/kototech-aug-hackathon-team3`](https://github.com/kotonara-tech/kototech-aug-hackathon-team3)
-（空き家活用アドバイザー）のサーバーサイド。
+のバックエンド。FastAPI + SQLite。
 
-## 構成
+所在地と物件の詳細を受け取り、**売却 / 賃貸 / 保持**のどれが有力かを判定して、
+画面の 8 セクション分のレポート本文を返す。
+
+## フロントとの接続
 
 ```
-backend/    Python / FastAPI + SQLite の API 本体
-            └ CLAUDE.md   backend で作業するとき用の指針
-CLAUDE.md   フロント側リポジトリから移植（@AGENTS.md を読み込む / Next.js 向け）
-AGENTS.md   同上
+ブラウザ
+  └─ POST /api/advice            … src/lib/apiClient.ts
+       └─ Next.js ルートハンドラ  … src/app/api/advice/route.ts
+            └─ POST {API_BASE_URL}/advice   ← このリポジトリ
 ```
 
-## クイックスタート
+ブラウザから直接ではなく Next.js のサーバー側を経由するので、**CORS の設定は不要**。
+
+フロント側 `.env.local`:
+
+```env
+API_BASE_URL=http://localhost:8000
+```
+
+## セットアップ
 
 ```bash
-cd backend
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
 pip install -r requirements.txt
+cp .env.example .env             # そのままでも動く
+
 uvicorn app.main:app --reload --port 8000
 ```
 
-フロント側の `.env.local` に `API_BASE_URL=http://localhost:8000` を設定すると繋がる。
+- Swagger UI: <http://localhost:8000/docs>
+- ヘルスチェック: <http://localhost:8000/health>
+
+起動時に SQLite のスキーマ作成とマスタ投入が自動で走る。初期設定は不要。
+
+## エンドポイント
+
+| メソッド | パス | 説明 |
+| --- | --- | --- |
+| POST | `/advice` | **診断（フロントが叩くのはこれだけ）** |
+| GET | `/advice/history` | 診断履歴（動作確認用） |
+| GET | `/regions` | 登録済みの都道府県一覧（動作確認用） |
+| GET | `/health` | ヘルスチェック |
+
+### `POST /advice`
+
+リクエスト（`src/lib/types.ts` の `AdviceRequest`）。
+未入力の項目はキーごと送られてこない前提で、すべて省略可。
+
+```jsonc
+{
+  "prefecture": "京都府",
+  "city": "京都市中京区",
+  "detail": {
+    "tsubo": 35,               // 坪数
+    "built_years": 40,         // 築年数
+    "structure": "木造",
+    "property_type": "戸建て",
+    "floors": "2階建て",
+    "parking": "あり（1台）"
+  }
+}
+```
+
+レスポンス（`AdviceResult`）。`sections` のキーは
+`src/lib/sections.ts` の `ADVICE_SECTIONS` の id と一致する。
+
+```jsonc
+{
+  "recommendation": "sell",
+  "sections": {
+    "summary": "京都府京都市中京区の戸建てについて、診断結果は「売却」が最有力です。…",
+    "sell":    "【今回の診断ではこの選択肢が最有力です】\n\n想定売却価格は約 8,497 万円です。…",
+    "rent":    "…",
+    "hold":    "…",
+    "market":  "…",
+    "cost":    "…",
+    "risk":    "…",
+    "next":    "…"
+  }
+}
+```
+
+エラーは必ず `{"error": "..."}` の形で返す（`apiClient.ts` が `error` キーを読むため）。
+
+```jsonc
+// 400
+{ "error": "「架空県」の相場データがありません。都道府県名をご確認ください。" }
+```
+
+### 動かしてみる
+
+```bash
+curl -X POST http://localhost:8000/advice \
+  -H 'Content-Type: application/json' \
+  -d '{"prefecture":"京都府","city":"京都市中京区","detail":{"tsubo":35,"built_years":40,"structure":"木造"}}'
+```
+
+## 診断ロジック
+
+`app/advice.py`。売却・賃貸・保持を 0〜100 で採点し、最高点を `recommendation` にする。
+
+| 効く方向 | 要素 |
+| --- | --- |
+| 売却↑ | 坪単価が高い / 築古で建物の残存価値が低い / 人口減少 |
+| 賃貸↑ | 賃貸需要が高い / 建物が生きている / 駐車場あり / 平屋 / 人口増加 |
+| 保持↑ | 人口増加 / 空き家率が低い / 建物が新しい |
+
+- 建物の残存価値 = `1 - 築年数 / 法定耐用年数`（下限 5%、上限 100%）
+- 種別ごとの重みを最後に掛ける。「土地のみ」は賃貸を 0 点にして候補から外す
+- 同点なら 売却 → 賃貸 → 保持 の順で決まる
+- 坪数が未入力なら金額の試算は行わず、その旨を本文に出す
+
+## データ構造（SQLite）
 
 ```
-ブラウザ → /api/advice（Next.js ルートハンドラ）→ POST /advice（このリポジトリ）
+regions                地域ごとの相場・需要（city='' が都道府県のデフォルト）
+structure_factors      造りごとの法定耐用年数・再建築費・リフォーム費
+property_type_factors  種別ごとの重みと賃貸可否
+advice_templates       セクション本文のテンプレート（recommendation='any' は共通文）
+diagnoses              診断履歴（入力・判定・スコア・本文）
 ```
 
-詳細は [`backend/README.md`](backend/README.md)。
+DB ファイルは `DATABASE_PATH`（既定 `./data/app.db`）。
+テーブル定義は `app/db.py` の `SCHEMA`、初期データは `app/seed.py` にまとまっている。
+
+**相場データについて**: `app/seed.py` の数値は公開統計をもとにした
+ハッカソン用のざっくりした目安で、実勢価格そのものではない。
+市区町村レベルの行は主要 12 地点のみ登録済みで、
+未登録の市区町村は都道府県のデフォルト値にフォールバックする。
+
+## テスト
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+37 件。フロントとの契約（セクション id、レスポンスの形、エラーの形）を
+`tests/test_api.py` で固定してある。
+`src/lib/sections.ts` を変更したら `tests/conftest.py` の
+`FRONTEND_SECTION_IDS` も合わせて直すこと。
