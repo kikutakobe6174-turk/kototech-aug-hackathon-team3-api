@@ -145,6 +145,47 @@ DB ファイルは `DATABASE_PATH`（既定 `./data/app.db`）。
 市区町村レベルの行は主要 12 地点のみ登録済みで、
 未登録の市区町村は都道府県のデフォルト値にフォールバックする。
 
+## 活用方法の生成（Gemini）
+
+診断とは別に、**その空き家の具体的な活用方法**を Gemini に生成させる。
+いまのところ結果は**サーバーログに出すだけ**で、フロントへのレスポンスには含めない
+（生成内容を目視で確認してから組み込むため）。
+
+`.env` に API キーを入れると有効になる。キーが無くても API は普通に動く。
+
+```env
+GEMINI_API_KEY=＜https://aistudio.google.com/apikey で取得＞
+GEMINI_MODEL=gemini-3.5-flash
+GEMINI_API_REVISION=2026-05-20
+GEMINI_TIMEOUT_SECONDS=30
+GEMINI_ENABLED=true
+LOG_LEVEL=INFO          # DEBUG にするとプロンプトも出る
+LOG_ENCODING=utf-8      # ターミナルが cp932 なら cp932
+```
+
+`POST /advice` を受けると、レスポンスを返した**あと**にバックグラウンドで生成する。
+診断の応答は待たされない。ログはこう出る。
+
+```
+========== Gemini 活用方法 ==========
+対象: 京都府京都市中京区 / 判定: sell / モデル: gemini-3.5-flash
+-------------------------------------
+■ 解体して駐車場として貸す
+  概要: ...
+  想定初期費用: ...
+  ...
+=====================================
+```
+
+キー未設定なら `[Gemini] スキップ（GEMINI_API_KEY が未設定）: ...`、
+失敗したら `[Gemini] 生成に失敗: ... / Gemini がエラーを返しました (400): ...` が出る。
+**生成が失敗しても `/advice` は 200 のまま**なので、画面には影響しない。
+
+使っているのは Interactions API
+（`POST https://generativelanguage.googleapis.com/v1beta/interactions`、
+`x-goog-api-key` ヘッダー）。
+仕様が変わったら `GEMINI_API_REVISION` と `app/gemini.py` を見直す。
+
 ## データ出典
 
 相場・需要データの出どころと、実データ（不動産情報ライブラリ / e-Stat）への
@@ -157,7 +198,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-38 件。フロントとの契約（セクション id、レスポンスの形、エラーの形）を
+48 件。フロントとの契約（セクション id、レスポンスの形、エラーの形）を
 `tests/test_api.py` で固定してある。
 `src/lib/sections.ts` を変更したら `tests/conftest.py` の
 `FRONTEND_SECTION_IDS` も合わせて直すこと。

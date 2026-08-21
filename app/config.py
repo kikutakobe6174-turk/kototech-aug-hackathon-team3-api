@@ -29,12 +29,34 @@ def _int(key: str, default: int) -> int:
         return default
 
 
+def _float(key: str, default: float) -> float:
+    raw = os.getenv(key)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     database_path: Path
     allowed_origins: tuple[str, ...]
     save_history: bool
     history_limit: int
+    log_level: str
+
+    # Gemini（活用方法の生成）
+    gemini_api_key: str | None
+    gemini_model: str
+    gemini_api_revision: str
+    gemini_timeout_seconds: float
+
+    @property
+    def gemini_enabled(self) -> bool:
+        """API キーがあり、明示的に無効化されていないときだけ使う。"""
+        return bool(self.gemini_api_key)
 
 
 @lru_cache(maxsize=1)
@@ -49,4 +71,13 @@ def get_settings() -> Settings:
         allowed_origins=origins,
         save_history=_bool("SAVE_HISTORY", True),
         history_limit=_int("HISTORY_LIMIT", 100),
+        log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        gemini_api_key=(
+            os.getenv("GEMINI_API_KEY") or None
+            if _bool("GEMINI_ENABLED", True)
+            else None
+        ),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+        gemini_api_revision=os.getenv("GEMINI_API_REVISION", "2026-05-20"),
+        gemini_timeout_seconds=_float("GEMINI_TIMEOUT_SECONDS", 30.0),
     )

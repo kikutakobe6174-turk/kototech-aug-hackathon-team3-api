@@ -10,6 +10,8 @@ FastAPI 既定の `{"detail": ...}` のままだとメッセージが表示さ�
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -35,6 +37,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 settings = get_settings()
+
+def _configure_logging() -> None:
+    """日本語のログが化けないようにしてから、root ロガーを設定する。
+
+    - Windows では標準出力の既定が cp932 になり、リダイレクトすると
+      ログの日本語が cp932 で書かれてしまう。UTF-8 に固定する。
+    - uvicorn は root ロガーにハンドラを付けないため、自前で設定しないと
+      アプリ側の logger.info がコンソールに出ない。
+    """
+    encoding = os.getenv("LOG_ENCODING", "utf-8")
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding=encoding, errors="backslashreplace")
+        except (ValueError, OSError):  # 差し替え済みのストリームなど
+            pass
+
+    # basicConfig は既にハンドラがあれば何もしないので、二重設定にはならない。
+    logging.basicConfig(
+        level=settings.log_level,
+        format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+    )
+
+
+_configure_logging()
 
 app = FastAPI(
     title="空き家活用アドバイザー API",

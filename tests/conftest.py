@@ -40,6 +40,9 @@ def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:3000")
     monkeypatch.setenv("SAVE_HISTORY", "true")
     monkeypatch.setenv("HISTORY_LIMIT", "100")
+    # 実際の .env に GEMINI_API_KEY があってもテストが外へ出ていかないようにする
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
 
     from app import config
 
@@ -51,6 +54,7 @@ def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "app.db",
         "app.seed",
         "app.advice",
+        "app.gemini",
         "app.repository",
         "app.models",
         "app.routers.advice",

@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 
 from .. import advice as advice_logic
-from .. import repository
+from .. import gemini, repository
 from ..config import Settings, get_settings
 from ..db import get_db
 from ..models import AdviceRequest, AdviceResult
@@ -60,6 +60,7 @@ def _build_factors(
 )
 def create_advice(
     body: AdviceRequest,
+    background: BackgroundTasks,
     conn: sqlite3.Connection = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> AdviceResult:
@@ -83,6 +84,16 @@ def create_advice(
             sections=result.sections,
         )
         repository.trim_history(conn, settings.history_limit)
+
+    # 活用方法の生成はレスポンスを待たせないようバックグラウンドで回し、
+    # 結果はいまのところサーバーログにだけ出す。
+    background.add_task(
+        gemini.log_utilization_ideas,
+        detail,
+        factors,
+        result.scores,
+        result.recommendation,
+    )
 
     return AdviceResult(
         recommendation=result.recommendation, sections=result.sections
