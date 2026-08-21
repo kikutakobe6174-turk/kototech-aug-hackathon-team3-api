@@ -40,6 +40,25 @@ python run.py                    # または uvicorn app.main:app --reload --por
 > `attempted relative import with no known parent package` になる。
 > **リポジトリ直下から** `python run.py` か `uvicorn app.main:app` で起動する。
 
+### 起動しない / すぐ止まるとき
+
+起動直後に `Shutting down` → `Stopping reloader process` と出て終わる場合、
+**ポート 8000 が別のプロセスに使われている**ことがほとんど。
+前に起動したサーバーが残っていると起きる。`run.py` は先にポートを確認して
+理由を表示するので、メッセージに従って残プロセスを止めるか、別ポートで起動する。
+
+```bash
+PORT=8001 python run.py
+```
+
+残っているプロセスの調べ方（PowerShell）:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8000 -State Listen |
+  ForEach-Object { Get-CimInstance Win32_Process -Filter "ProcessId=$($_.OwningProcess)" } |
+  Select-Object ProcessId, CommandLine
+```
+
 - Swagger UI: <http://localhost:8000/docs>
 - ヘルスチェック: <http://localhost:8000/health>
 
@@ -198,7 +217,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-48 件。フロントとの契約（セクション id、レスポンスの形、エラーの形）を
+56 件。フロントとの契約（セクション id、レスポンスの形、エラーの形）を
 `tests/test_api.py` で固定してある。
 `src/lib/sections.ts` を変更したら `tests/conftest.py` の
 `FRONTEND_SECTION_IDS` も合わせて直すこと。

@@ -37,6 +37,11 @@ pytest
 `python app/main.py` は動かない（`app` はパッケージで、`main.py` が相対 import を
 使っているため）。必ずリポジトリ直下からパッケージとして読み込ませる。
 
+`run.py` は reload の監視対象を `app/` に絞っている。リポジトリ全体を見せると
+`.venv` の 3,000 ファイル超まで走査してしまうため。監視対象を広げないこと。
+起動前にポートの空きも確認する。埋まっていると uvicorn は
+`Application startup complete` の直後に黙って終了してしまい、原因が分かりにくい。
+
 ## アーキテクチャ
 
 ```
@@ -51,7 +56,7 @@ app/
   main.py         アプリ生成・エラーハンドラ・ルーター登録
   routers/
     advice.py     POST /advice, GET /advice/history, GET /regions
-tests/            48 件
+tests/            56 件
 run.py            開発用の起動スクリプト
 docs/
   DATA_SOURCES.md 相場データの出典と、実データへの差し替え手順
