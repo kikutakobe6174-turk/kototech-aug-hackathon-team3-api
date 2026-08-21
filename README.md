@@ -32,8 +32,13 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env             # そのままでも動く
 
-uvicorn app.main:app --reload --port 8000
+python run.py                    # または uvicorn app.main:app --reload --port 8000
 ```
+
+> `python app/main.py` は動かない。`app` はパッケージで `main.py` が相対 import を
+> 使っているため、単体スクリプトとして実行すると
+> `attempted relative import with no known parent package` になる。
+> **リポジトリ直下から** `python run.py` か `uvicorn app.main:app` で起動する。
 
 - Swagger UI: <http://localhost:8000/docs>
 - ヘルスチェック: <http://localhost:8000/health>
@@ -143,7 +148,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-37 件。フロントとの契約（セクション id、レスポンスの形、エラーの形）を
+38 件。フロントとの契約（セクション id、レスポンスの形、エラーの形）を
 `tests/test_api.py` で固定してある。
 `src/lib/sections.ts` を変更したら `tests/conftest.py` の
 `FRONTEND_SECTION_IDS` も合わせて直すこと。

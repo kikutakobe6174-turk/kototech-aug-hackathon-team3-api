@@ -30,9 +30,12 @@ python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
 
-uvicorn app.main:app --reload --port 8000
+python run.py                    # = uvicorn app.main:app --reload --port 8000
 pytest
 ```
+
+`python app/main.py` は動かない（`app` はパッケージで、`main.py` が相対 import を
+使っているため）。必ずリポジトリ直下からパッケージとして読み込ませる。
 
 ## アーキテクチャ
 
@@ -47,7 +50,8 @@ app/
   main.py         アプリ生成・エラーハンドラ・ルーター登録
   routers/
     advice.py     POST /advice, GET /advice/history, GET /regions
-tests/            37 件
+tests/            38 件
+run.py            開発用の起動スクリプト
 ```
 
 ### レイヤの約束
@@ -92,6 +96,10 @@ tests/            37 件
   都道府県自体が無ければ 400 を返す。
 - 本文テンプレートは `str.format_map` で埋める。未知のプレースホルダは
   `advice._Blanks` が `—` に置き換えるので、テンプレートのタイポで 500 にはならない。
+- `db.ensure_schema` がリクエストごとにテーブルの有無を確認し、無ければ作り直す。
+  sqlite3 は存在しないパスを開くと空の DB を黙って作るため、これが無いと
+  「data/ を消した」「DATABASE_PATH を変えた」だけで
+  `no such table: regions` の 500 になる。
 
 ## 相場データの扱い
 

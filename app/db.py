@@ -6,11 +6,14 @@ ORM は使わず標準ライブラリの sqlite3 だけで完結させている�
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
 from .config import get_settings
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 -- 地域ごとの相場・需要データ。
@@ -102,10 +105,31 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
             own.close()
 
 
+def schema_is_ready(conn: sqlite3.Connection) -> bool:
+    """スキーマが入っているかを 1 クエリで確かめる。"""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'regions'"
+    ).fetchone()
+    return row is not None
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    """DB ファイルが消えた・作り直された場合でも、その場で復旧する。
+
+    sqlite3 は存在しないパスを開くと空の DB を黙って作るため、
+    これが無いと「no such table: regions」で 500 になる。
+    起動後に data/ を消す、DATABASE_PATH を変える、といった操作で実際に起きる。
+    """
+    if not schema_is_ready(conn):
+        logger.warning("スキーマが見つからないため再作成します: %s", get_settings().database_path)
+        init_db(conn)
+
+
 def get_db() -> Iterator[sqlite3.Connection]:
     """FastAPI の依存関係。リクエストごとに 1 コネクション。"""
     conn = connect()
     try:
+        ensure_schema(conn)
         yield conn
     finally:
         conn.close()

@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_db()
+    # どの DB を掴んでいるかはトラブル時に一番効くので、起動時に出しておく
+    logger.info("SQLite: %s", get_settings().database_path.resolve())
     yield
 
 

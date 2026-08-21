@@ -136,3 +136,20 @@ def test_regions_lists_47_prefectures(client):
     assert len(body["prefectures"]) == 47
     assert body["prefectures"][0] == "北海道"
     assert body["prefectures"][-1] == "沖縄県"
+
+
+def test_recovers_when_database_file_disappears(client, app_env):
+    """起動後に DB ファイルが消えても、次のリクエストで作り直して応答する。
+
+    sqlite3 は存在しないパスを開くと空の DB を黙って作るため、
+    復旧しないと「no such table: regions」で 500 になる。
+    """
+    settings = app_env["app.config"].get_settings()
+    assert client.post("/advice", json=SAMPLE_REQUEST).status_code == 200
+
+    settings.database_path.unlink()
+    assert not settings.database_path.exists()
+
+    res = client.post("/advice", json=SAMPLE_REQUEST)
+    assert res.status_code == 200, res.text
+    assert set(res.json()["sections"]) == set(FRONTEND_SECTION_IDS)
