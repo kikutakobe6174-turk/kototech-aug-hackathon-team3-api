@@ -1,16 +1,27 @@
-# Figma to JSON API
+# 空き家活用アドバイザー API
 
-FigmaのファイルをJSON構造体で返すサーバーサイド。FastAPI + SQLite。
+[`kotonara-tech/kototech-aug-hackathon-team3`](https://github.com/kotonara-tech/kototech-aug-hackathon-team3)
+のバックエンド。FastAPI + SQLite。
 
-フロントエンド: [`kotonara-tech/kototech-aug-hackathon-team3`](https://github.com/kotonara-tech/kototech-aug-hackathon-team3)
+所在地と物件の詳細を受け取り、**売却 / 賃貸 / 保持**のどれが有力かを判定して、
+画面の 8 セクション分のレポート本文を返す。
 
-このディレクトリ（`backend/`）がサーバーサイド一式。
+## フロントとの接続
 
-## できること
+```
+ブラウザ
+  └─ POST /api/advice            … src/lib/apiClient.ts
+       └─ Next.js ルートハンドラ  … src/app/api/advice/route.ts
+            └─ POST {API_BASE_URL}/advice   ← このリポジトリ
+```
 
-- Figma OAuth でログイン（セッションは httpOnly cookie）
-- file key を渡すと、Figma のノードツリーを整形した JSON を返す
-- 取得結果を SQLite に保存し、履歴・キャッシュ・ノード検索ができる
+ブラウザから直接ではなく Next.js のサーバー側を経由するので、**CORS の設定は不要**。
+
+フロント側 `.env.local`:
+
+```env
+API_BASE_URL=http://localhost:8000
+```
 
 ## セットアップ
 
@@ -18,147 +29,114 @@ FigmaのファイルをJSON構造体で返すサーバーサイド。FastAPI + S
 cd backend
 
 python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-# macOS / Linux
-source .venv/bin/activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
 pip install -r requirements.txt
-cp .env.example .env
-```
+cp .env.example .env             # そのままでも動く
 
-### Figma アプリの登録
-
-<https://www.figma.com/developers/apps> で App を作り、以下を `.env` に設定する。
-
-| 変数 | 値 |
-| --- | --- |
-| `FIGMA_CLIENT_ID` | App の Client ID |
-| `FIGMA_CLIENT_SECRET` | App の Client Secret |
-| `FIGMA_REDIRECT_URI` | `http://localhost:8000/callback`（Figma 側にも同じ値を登録する） |
-| `FRONTEND_URL` | `http://localhost:3000` |
-| `ALLOWED_ORIGINS` | `http://localhost:3000` |
-
-### 起動
-
-```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
 - Swagger UI: <http://localhost:8000/docs>
 - ヘルスチェック: <http://localhost:8000/health>
 
-フロント側の `.env.local` には `NEXT_PUBLIC_API_URL=http://localhost:8000` を入れる。
-
-### OAuth なしで試す（開発用）
-
-Figma の Personal Access Token があれば、ログインを飛ばして動作確認できる。
-
-```env
-DEV_MODE=true
-FIGMA_PERSONAL_ACCESS_TOKEN=figd_xxxxxxxx
-```
-
-```bash
-curl -X POST http://localhost:8000/api/figma \
-  -H 'Content-Type: application/json' \
-  -d '{"fileKey":"あなたのfile key"}'
-```
+起動時に SQLite のスキーマ作成とマスタ投入が自動で走る。初期設定は不要。
 
 ## エンドポイント
 
 | メソッド | パス | 説明 |
 | --- | --- | --- |
-| GET | `/login` | Figma の認可画面へリダイレクト |
-| GET | `/callback` | Figma からの戻り。cookie を発行し `FRONTEND_URL/file` へ |
-| POST | `/logout` | ログアウト |
-| GET | `/me` | ログイン中のユーザー |
-| POST | `/api/figma` | **file key から JSON 構造体を取得（メイン）** |
-| GET | `/api/figma/history` | 取得履歴 |
-| GET | `/api/figma/{file_key}` | 保存済みの構造体 |
-| GET | `/api/figma/{file_key}/nodes` | 保存済みノードを絞り込み検索 |
-| GET | `/api/figma/{file_key}/stats` | ノード種別ごとの件数 |
-| DELETE | `/api/figma/{file_key}` | 履歴を削除 |
+| POST | `/advice` | **診断（フロントが叩くのはこれだけ）** |
+| GET | `/advice/history` | 診断履歴（動作確認用） |
+| GET | `/regions` | 登録済みの都道府県一覧（動作確認用） |
+| GET | `/health` | ヘルスチェック |
 
-### `POST /api/figma`
+### `POST /advice`
+
+リクエスト（`src/lib/types.ts` の `AdviceRequest`）。
+未入力の項目はキーごと送られてこない前提で、すべて省略可。
 
 ```jsonc
-// リクエスト
 {
-  "fileKey": "ABCDEFG12345",
-  "refresh": false,   // 省略可。true でキャッシュを無視して取り直す
-  "maxDepth": 100     // 省略可。ツリーの最大深さ
-}
-```
-
-```jsonc
-// レスポンス
-{
-  "fileKey": "ABCDEFG12345",
-  "name": "Hackathon UI",
-  "version": "42",
-  "lastModified": "2026-08-20T10:00:00Z",
-  "thumbnailUrl": "https://...",
-  "nodeCount": 128,
-  "fetchedAt": "2026-08-21 11:22:33",
-  "cached": false,
-  "structure": {
-    "name": "Hackathon UI",
-    "document": {
-      "id": "0:0",
-      "name": "Document",
-      "type": "DOCUMENT",
-      "children": [
-        {
-          "id": "2:1",
-          "name": "Login",
-          "type": "FRAME",
-          "layout": { "box": { "x": 0, "y": 0, "width": 375, "height": 812 },
-                      "layoutMode": "VERTICAL", "itemSpacing": 16 },
-          "fills": [{ "type": "SOLID", "color": "#FFFFFF" }],
-          "children": [
-            { "id": "2:2", "name": "Title", "type": "TEXT",
-              "characters": "Figma to JSON",
-              "textStyle": { "fontFamily": "Inter", "fontSize": 40 } }
-          ]
-        }
-      ]
-    },
-    "components": {}, "componentSets": {}, "styles": {}
+  "prefecture": "京都府",
+  "city": "京都市中京区",
+  "detail": {
+    "tsubo": 35,               // 坪数
+    "built_years": 40,         // 築年数
+    "structure": "木造",
+    "property_type": "戸建て",
+    "floors": "2階建て",
+    "parking": "あり（1台）"
   }
 }
 ```
 
-生の Figma レスポンスをそのまま返すのではなく、色は `#RRGGBB` に、レイアウトは
-`layout`、文字スタイルは `textStyle` にまとめて返す。
+レスポンス（`AdviceResult`）。`sections` のキーは
+`src/lib/sections.ts` の `ADVICE_SECTIONS` の id と一致する。
 
-### ノード検索
+```jsonc
+{
+  "recommendation": "sell",
+  "sections": {
+    "summary": "京都府京都市中京区の戸建てについて、診断結果は「売却」が最有力です。…",
+    "sell":    "【今回の診断ではこの選択肢が最有力です】\n\n想定売却価格は約 8,497 万円です。…",
+    "rent":    "…",
+    "hold":    "…",
+    "market":  "…",
+    "cost":    "…",
+    "risk":    "…",
+    "next":    "…"
+  }
+}
+```
 
-取得時にツリーを `figma_nodes` テーブルへ展開しているので、JSON を辿らずに検索できる。
+エラーは必ず `{"error": "..."}` の形で返す（`apiClient.ts` が `error` キーを読むため）。
+
+```jsonc
+// 400
+{ "error": "「架空県」の相場データがありません。都道府県名をご確認ください。" }
+```
+
+### 動かしてみる
 
 ```bash
-# テキストノードだけ
-curl 'http://localhost:8000/api/figma/ABCDEFG12345/nodes?type=TEXT'
-# ある親の直下だけ
-curl 'http://localhost:8000/api/figma/ABCDEFG12345/nodes?parent=2:1'
-# 名前の部分一致
-curl 'http://localhost:8000/api/figma/ABCDEFG12345/nodes?name=Button'
+curl -X POST http://localhost:8000/advice \
+  -H 'Content-Type: application/json' \
+  -d '{"prefecture":"京都府","city":"京都市中京区","detail":{"tsubo":35,"built_years":40,"structure":"木造"}}'
 ```
+
+## 診断ロジック
+
+`app/advice.py`。売却・賃貸・保持を 0〜100 で採点し、最高点を `recommendation` にする。
+
+| 効く方向 | 要素 |
+| --- | --- |
+| 売却↑ | 坪単価が高い / 築古で建物の残存価値が低い / 人口減少 |
+| 賃貸↑ | 賃貸需要が高い / 建物が生きている / 駐車場あり / 平屋 / 人口増加 |
+| 保持↑ | 人口増加 / 空き家率が低い / 建物が新しい |
+
+- 建物の残存価値 = `1 - 築年数 / 法定耐用年数`（下限 5%、上限 100%）
+- 種別ごとの重みを最後に掛ける。「土地のみ」は賃貸を 0 点にして候補から外す
+- 同点なら 売却 → 賃貸 → 保持 の順で決まる
+- 坪数が未入力なら金額の試算は行わず、その旨を本文に出す
 
 ## データ構造（SQLite）
 
 ```
-users ──┬── oauth_tokens        (1:1  アクセストークン)
-        ├── sessions            (1:N  ログインセッション / cookie はハッシュで保存)
-        └── figma_files         (1:N  取得したファイル・変換済み JSON)
-                └── figma_nodes (1:N  ノードを平坦化。parent_node_id で自己参照)
-
-oauth_states                    (OAuth の state。CSRF 対策の使い捨て)
+regions                地域ごとの相場・需要（city='' が都道府県のデフォルト）
+structure_factors      造りごとの法定耐用年数・再建築費・リフォーム費
+property_type_factors  種別ごとの重みと賃貸可否
+advice_templates       セクション本文のテンプレート（recommendation='any' は共通文）
+diagnoses              診断履歴（入力・判定・スコア・本文）
 ```
 
-DB ファイルは `DATABASE_PATH`（既定 `./data/app.db`）。スキーマは起動時に自動作成される。
-テーブル定義は `app/db.py` の `SCHEMA` にまとまっている。
+DB ファイルは `DATABASE_PATH`（既定 `./data/app.db`）。
+テーブル定義は `app/db.py` の `SCHEMA`、初期データは `app/seed.py` にまとまっている。
+
+**相場データについて**: `app/seed.py` の数値は公開統計をもとにした
+ハッカソン用のざっくりした目安で、実勢価格そのものではない。
+市区町村レベルの行は主要 12 地点のみ登録済みで、
+未登録の市区町村は都道府県のデフォルト値にフォールバックする。
 
 ## テスト
 
@@ -167,16 +145,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Figma への通信はすべてモックしているので、ネットワークもトークンも不要。
-
-## 本番デプロイ時の注意
-
-フロントとサーバーが別ドメインになる場合は cookie の設定を変える。
-
-```env
-COOKIE_SECURE=true
-COOKIE_SAMESITE=none
-FRONTEND_URL=https://your-frontend.example.com
-ALLOWED_ORIGINS=https://your-frontend.example.com
-FIGMA_REDIRECT_URI=https://your-api.example.com/callback
-```
+37 件。フロントとの契約（セクション id、レスポンスの形、エラーの形）を
+`tests/test_api.py` で固定してある。
+`src/lib/sections.ts` を変更したら `tests/conftest.py` の
+`FRONTEND_SECTION_IDS` も合わせて直すこと。

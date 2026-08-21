@@ -1,24 +1,45 @@
 from __future__ import annotations
 
 import importlib
-import os
 from pathlib import Path
 
 import pytest
 
+# フロント `src/lib/sections.ts` の ADVICE_SECTIONS と同じ id・同じ並び。
+# ここがずれると画面がプレースホルダのままになるので、テストで固定する。
+FRONTEND_SECTION_IDS = (
+    "summary",
+    "sell",
+    "rent",
+    "hold",
+    "market",
+    "cost",
+    "risk",
+    "next",
+)
 
-def _load_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+# フロント `src/lib/adviceRequest.ts` が組み立てる形。
+SAMPLE_REQUEST = {
+    "prefecture": "京都府",
+    "city": "京都市中京区",
+    "detail": {
+        "tsubo": 35,
+        "built_years": 40,
+        "structure": "木造",
+        "property_type": "戸建て",
+        "floors": "2階建て",
+        "parking": "あり（1台）",
+    },
+}
+
+
+@pytest.fixture()
+def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """テストごとに使い捨ての SQLite を指す設定でアプリを読み込み直す。"""
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "test.db"))
-    monkeypatch.setenv("FIGMA_CLIENT_ID", "test-client")
-    monkeypatch.setenv("FIGMA_CLIENT_SECRET", "test-secret")
-    monkeypatch.setenv("FIGMA_REDIRECT_URI", "http://localhost:8000/callback")
-    monkeypatch.setenv("FRONTEND_URL", "http://localhost:3000")
     monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:3000")
-    monkeypatch.setenv("FILE_CACHE_TTL_SECONDS", "300")
-    monkeypatch.setenv("DEV_MODE", os.getenv("DEV_MODE", "false"))
-    if os.getenv("DEV_MODE", "false") != "true":
-        monkeypatch.delenv("FIGMA_PERSONAL_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("SAVE_HISTORY", "true")
+    monkeypatch.setenv("HISTORY_LIMIT", "100")
 
     from app import config
 
@@ -28,23 +49,17 @@ def _load_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     for name in (
         "app.config",
         "app.db",
-        "app.figma",
+        "app.seed",
+        "app.advice",
         "app.repository",
-        "app.deps",
         "app.models",
-        "app.routers.auth",
-        "app.routers.figma",
+        "app.routers.advice",
         "app.main",
     ):
         modules[name] = importlib.reload(importlib.import_module(name))
 
     yield modules
     config.get_settings.cache_clear()
-
-
-@pytest.fixture()
-def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    yield from _load_app(tmp_path, monkeypatch)
 
 
 @pytest.fixture()
@@ -56,99 +71,39 @@ def client(app_env):
 
 
 @pytest.fixture()
-def dev_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """DEV_MODE + Personal Access Token でログイン不要にした状態。"""
-    monkeypatch.setenv("DEV_MODE", "true")
-    monkeypatch.setenv("FIGMA_PERSONAL_ACCESS_TOKEN", "figd_test")
-    yield from _load_app(tmp_path, monkeypatch)
-
-
-@pytest.fixture()
-def dev_client(dev_env):
-    from fastapi.testclient import TestClient
-
-    with TestClient(dev_env["app.main"].app) as c:
-        yield c
-
-
-@pytest.fixture()
-def logged_in(app_env, client):
-    """DB に直接ユーザーとセッションを作り、cookie を仕込む。"""
+def conn(app_env):
     db = app_env["app.db"]
-    repository = app_env["app.repository"]
+    db.init_db()
+    c = db.connect()
+    yield c
+    c.close()
 
-    conn = db.connect()
-    try:
-        user = repository.upsert_user(
-            conn, {"id": "1234", "handle": "tester", "email": "t@example.com"}
+
+@pytest.fixture()
+def factors(app_env):
+    """テスト用に係数を直接組み立てるヘルパ。"""
+    advice = app_env["app.advice"]
+
+    def build(**overrides):
+        base = dict(
+            prefecture="京都府",
+            city="京都市中京区",
+            land_price_per_tsubo=240,
+            rent_per_tsubo=7600,
+            rent_demand=0.90,
+            population_trend=0.15,
+            vacancy_rate=0.11,
+            structure_name="木造",
+            legal_life_years=22,
+            build_cost_per_tsubo=65,
+            renovation_cost_per_tsubo=20,
+            property_type_name="戸建て",
+            sell_weight=1.0,
+            rent_weight=1.0,
+            hold_weight=1.0,
+            rentable=True,
         )
-        repository.save_tokens(
-            conn,
-            user["id"],
-            {"access_token": "tok", "refresh_token": "ref", "expires_in": 3600},
-        )
-        raw, _ = repository.create_session(conn, user["id"], 24)
-    finally:
-        conn.close()
+        base.update(overrides)
+        return advice.Factors(**base)
 
-    client.cookies.set(os.getenv("SESSION_COOKIE_NAME", "session"), raw)
-    return {"user_id": user["id"], "token": raw}
-
-
-FAKE_FILE = {
-    "name": "Hackathon UI",
-    "version": "42",
-    "lastModified": "2026-08-20T10:00:00Z",
-    "thumbnailUrl": "https://example.com/thumb.png",
-    "role": "owner",
-    "editorType": "figma",
-    "document": {
-        "id": "0:0",
-        "name": "Document",
-        "type": "DOCUMENT",
-        "children": [
-            {
-                "id": "1:1",
-                "name": "Page 1",
-                "type": "CANVAS",
-                "children": [
-                    {
-                        "id": "2:1",
-                        "name": "Login",
-                        "type": "FRAME",
-                        "absoluteBoundingBox": {
-                            "x": 0,
-                            "y": 0,
-                            "width": 375,
-                            "height": 812,
-                        },
-                        "layoutMode": "VERTICAL",
-                        "itemSpacing": 16,
-                        "fills": [
-                            {"type": "SOLID", "color": {"r": 1, "g": 1, "b": 1, "a": 1}}
-                        ],
-                        "children": [
-                            {
-                                "id": "2:2",
-                                "name": "Title",
-                                "type": "TEXT",
-                                "characters": "Figma to JSON",
-                                "style": {"fontFamily": "Inter", "fontSize": 40},
-                                "fills": [
-                                    {
-                                        "type": "SOLID",
-                                        "color": {"r": 0, "g": 0, "b": 0, "a": 1},
-                                    }
-                                ],
-                            },
-                            {"id": "2:3", "name": "CTA", "type": "RECTANGLE"},
-                        ],
-                    }
-                ],
-            }
-        ],
-    },
-    "components": {},
-    "componentSets": {},
-    "styles": {},
-}
+    return build

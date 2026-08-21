@@ -8,85 +8,67 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 
 from .config import get_settings
 
 SCHEMA = """
--- Figma でログインしたユーザー
-CREATE TABLE IF NOT EXISTS users (
+-- 地域ごとの相場・需要データ。
+-- city = '' の行がその都道府県のデフォルト（市区町村が未登録のときに使う）。
+CREATE TABLE IF NOT EXISTS regions (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    prefecture           TEXT NOT NULL,
+    city                 TEXT NOT NULL DEFAULT '',
+    land_price_per_tsubo INTEGER NOT NULL,  -- 坪単価（万円）
+    rent_per_tsubo       INTEGER NOT NULL,  -- 坪あたり月額賃料（円）
+    rent_demand          REAL    NOT NULL,  -- 賃貸需要 0.0-1.0
+    population_trend     REAL    NOT NULL,  -- 人口動態 -1.0-1.0
+    vacancy_rate         REAL    NOT NULL,  -- 空き家率 0.0-1.0
+    UNIQUE (prefecture, city)
+);
+CREATE INDEX IF NOT EXISTS idx_regions_pref ON regions(prefecture);
+
+-- 造りごとの係数。法定耐用年数から建物の残存価値を出す。
+CREATE TABLE IF NOT EXISTS structure_factors (
+    structure                 TEXT PRIMARY KEY,
+    legal_life_years          INTEGER NOT NULL,  -- 法定耐用年数
+    build_cost_per_tsubo      INTEGER NOT NULL,  -- 再建築費の目安（万円/坪）
+    renovation_cost_per_tsubo INTEGER NOT NULL   -- 賃貸化リフォーム費（万円/坪）
+);
+
+-- 種別ごとの重み。rentable = 0 なら賃貸を候補から外す。
+CREATE TABLE IF NOT EXISTS property_type_factors (
+    property_type TEXT PRIMARY KEY,
+    sell_weight   REAL NOT NULL DEFAULT 1.0,
+    rent_weight   REAL NOT NULL DEFAULT 1.0,
+    hold_weight   REAL NOT NULL DEFAULT 1.0,
+    rentable      INTEGER NOT NULL DEFAULT 1
+);
+
+-- 診断レポートの本文テンプレート。
+-- recommendation = 'any' の行は、判定結果によらない共通文。
+-- （NULL にすると SQLite の UNIQUE が NULL 同士を別物として扱い、再投入で重複するため）
+CREATE TABLE IF NOT EXISTS advice_templates (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    figma_user_id  TEXT NOT NULL UNIQUE,
-    handle         TEXT,
-    email          TEXT,
-    img_url        TEXT,
-    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    section_id     TEXT NOT NULL,
+    recommendation TEXT NOT NULL DEFAULT 'any',
+    body           TEXT NOT NULL,
+    UNIQUE (section_id, recommendation)
 );
+CREATE INDEX IF NOT EXISTS idx_templates_section ON advice_templates(section_id);
 
--- Figma OAuth のアクセストークン（ユーザー 1 人につき 1 行）
-CREATE TABLE IF NOT EXISTS oauth_tokens (
-    user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    access_token  TEXT NOT NULL,
-    refresh_token TEXT,
-    expires_at    TEXT,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- OAuth の state（CSRF 対策）。使い捨て。
-CREATE TABLE IF NOT EXISTS oauth_states (
-    state       TEXT PRIMARY KEY,
-    redirect_to TEXT,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at  TEXT NOT NULL
-);
-
--- ログインセッション。id は cookie に入れるトークンの SHA-256。
-CREATE TABLE IF NOT EXISTS sessions (
-    id           TEXT PRIMARY KEY,
-    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at   TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
-
--- 取得した Figma ファイル 1 件（= 変換済み JSON 構造のキャッシュ / 履歴）
-CREATE TABLE IF NOT EXISTS figma_files (
+-- 診断の履歴。入力と結果をそのまま残す。
+CREATE TABLE IF NOT EXISTS diagnoses (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    file_key       TEXT NOT NULL,
-    name           TEXT,
-    version        TEXT,
-    last_modified  TEXT,
-    thumbnail_url  TEXT,
-    node_count     INTEGER NOT NULL DEFAULT 0,
-    structure_json TEXT NOT NULL,
-    fetched_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (user_id, file_key)
+    prefecture     TEXT NOT NULL,
+    city           TEXT NOT NULL,
+    detail_json    TEXT NOT NULL,
+    recommendation TEXT NOT NULL,
+    scores_json    TEXT NOT NULL,
+    sections_json  TEXT NOT NULL,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_files_user ON figma_files(user_id, fetched_at DESC);
-
--- ファイルのノードツリーをフラットに展開したもの。
--- parent_node_id による自己参照で階層を表現する（JSON を舐めずに SQL で検索できる）。
-CREATE TABLE IF NOT EXISTS figma_nodes (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id        INTEGER NOT NULL REFERENCES figma_files(id) ON DELETE CASCADE,
-    node_id        TEXT NOT NULL,
-    parent_node_id TEXT,
-    name           TEXT,
-    type           TEXT,
-    depth          INTEGER NOT NULL,
-    order_index    INTEGER NOT NULL,
-    characters     TEXT,
-    attrs_json     TEXT NOT NULL DEFAULT '{}',
-    UNIQUE (file_id, node_id)
-);
-CREATE INDEX IF NOT EXISTS idx_nodes_parent ON figma_nodes(file_id, parent_node_id);
-CREATE INDEX IF NOT EXISTS idx_nodes_type ON figma_nodes(file_id, type);
+CREATE INDEX IF NOT EXISTS idx_diagnoses_created ON diagnoses(created_at DESC);
 """
 
 
@@ -108,30 +90,16 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection | None = None) -> None:
-    """スキーマを作成する（何度呼んでも安全）。"""
-    if conn is not None:
-        conn.executescript(SCHEMA)
-        return
-    own = connect()
+    """スキーマ作成と初期データ投入。何度呼んでも安全。"""
+    from .seed import seed_all
+
+    own = conn or connect()
     try:
         own.executescript(SCHEMA)
+        seed_all(own)
     finally:
-        own.close()
-
-
-@contextmanager
-def session_scope() -> Iterator[sqlite3.Connection]:
-    """`BEGIN` 〜 `COMMIT` / `ROLLBACK` をまとめて面倒みる。"""
-    conn = connect()
-    try:
-        conn.execute("BEGIN")
-        yield conn
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
+        if conn is None:
+            own.close()
 
 
 def get_db() -> Iterator[sqlite3.Connection]:

@@ -1,15 +1,8 @@
+"""SQLite のスキーマとマスタ投入のテスト。"""
+
 from __future__ import annotations
 
-import pytest
-
-
-@pytest.fixture()
-def conn(app_env):
-    db = app_env["app.db"]
-    db.init_db()
-    c = db.connect()
-    yield c
-    c.close()
+from tests.conftest import FRONTEND_SECTION_IDS
 
 
 def test_schema_tables_exist(conn):
@@ -18,100 +11,97 @@ def test_schema_tables_exist(conn):
         for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     assert {
-        "users",
-        "oauth_tokens",
-        "oauth_states",
-        "sessions",
-        "figma_files",
-        "figma_nodes",
+        "regions",
+        "structure_factors",
+        "property_type_factors",
+        "advice_templates",
+        "diagnoses",
     } <= names
 
 
-def test_foreign_keys_cascade(app_env, conn):
+def test_seed_is_idempotent(app_env, conn):
+    """init_db を何度呼んでも行数が増えない。"""
+    db = app_env["app.db"]
+
+    def counts():
+        return {
+            table: conn.execute(f"SELECT COUNT(*) c FROM {table}").fetchone()["c"]
+            for table in (
+                "regions",
+                "structure_factors",
+                "property_type_factors",
+                "advice_templates",
+            )
+        }
+
+    before = counts()
+    db.init_db(conn)
+    db.init_db(conn)
+    assert counts() == before
+    assert before["regions"] == 47 + 12  # 都道府県 + 市区町村の上書き
+
+
+def test_region_falls_back_to_prefecture(app_env, conn):
     repository = app_env["app.repository"]
-    figma = app_env["app.figma"]
-    from tests.conftest import FAKE_FILE
 
-    user = repository.upsert_user(conn, {"id": "1", "handle": "a"})
-    structure = figma.build_structure(FAKE_FILE)
-    repository.save_structure(conn, user["id"], "KEY", structure)
+    city = repository.find_region(conn, "京都府", "京都市中京区")
+    assert city["land_price_per_tsubo"] == 240
 
-    assert conn.execute("SELECT COUNT(*) c FROM figma_nodes").fetchone()["c"] == 5
+    fallback = repository.find_region(conn, "京都府", "宇治市")
+    assert fallback["city"] == ""
+    assert fallback["land_price_per_tsubo"] == 130
 
-    conn.execute("DELETE FROM users WHERE id = ?", (user["id"],))
-    assert conn.execute("SELECT COUNT(*) c FROM figma_files").fetchone()["c"] == 0
-    assert conn.execute("SELECT COUNT(*) c FROM figma_nodes").fetchone()["c"] == 0
+    assert repository.find_region(conn, "架空県", "架空市") is None
 
 
-def test_save_structure_is_idempotent(app_env, conn):
+def test_structure_and_property_type_fallback(app_env, conn):
     repository = app_env["app.repository"]
-    figma = app_env["app.figma"]
-    from tests.conftest import FAKE_FILE
 
-    user = repository.upsert_user(conn, {"id": "1", "handle": "a"})
-    structure = figma.build_structure(FAKE_FILE)
-    first = repository.save_structure(conn, user["id"], "KEY", structure)
-    second = repository.save_structure(conn, user["id"], "KEY", structure)
+    assert repository.get_structure_factor(conn, "木造")["legal_life_years"] == 22
+    assert repository.get_structure_factor(conn, None)["structure"] == "その他"
+    assert repository.get_structure_factor(conn, "藁")["structure"] == "その他"
 
-    assert first["id"] == second["id"]
-    assert conn.execute("SELECT COUNT(*) c FROM figma_files").fetchone()["c"] == 1
-    assert conn.execute("SELECT COUNT(*) c FROM figma_nodes").fetchone()["c"] == 5
+    assert repository.get_property_type_factor(conn, "土地のみ")["rentable"] == 0
+    assert repository.get_property_type_factor(conn, None)["property_type"] == "戸建て"
 
 
-def test_upsert_user_updates_profile(app_env, conn):
+def test_templates_cover_every_section(app_env, conn):
     repository = app_env["app.repository"]
-    repository.upsert_user(conn, {"id": "1", "handle": "old"})
-    row = repository.upsert_user(conn, {"id": "1", "handle": "new", "email": "n@x.jp"})
 
-    assert row["handle"] == "new"
-    assert row["email"] == "n@x.jp"
-    assert conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"] == 1
+    for recommendation in ("sell", "rent", "hold"):
+        templates = repository.get_templates(conn, recommendation)
+        assert set(templates) == set(FRONTEND_SECTION_IDS), recommendation
 
 
-def test_session_lookup_and_delete(app_env, conn):
+def test_recommendation_specific_template_wins(app_env, conn):
     repository = app_env["app.repository"]
-    user = repository.upsert_user(conn, {"id": "1", "handle": "a"})
 
-    raw, _ = repository.create_session(conn, user["id"], 24)
-    # 生トークンは保存されない（ハッシュのみ）
-    stored = conn.execute("SELECT id FROM sessions").fetchone()["id"]
-    assert stored != raw
-    assert stored == repository.hash_token(raw)
+    sell = repository.get_templates(conn, "sell")["summary"]
+    rent = repository.get_templates(conn, "rent")["summary"]
+    assert "「売却」が最有力" in sell
+    assert "「賃貸」が最有力" in rent
 
-    assert repository.get_session_user(conn, raw)["id"] == user["id"]
-    repository.delete_session(conn, raw)
-    assert repository.get_session_user(conn, raw) is None
-
-
-def test_expired_session_is_rejected(app_env, conn):
-    repository = app_env["app.repository"]
-    user = repository.upsert_user(conn, {"id": "1", "handle": "a"})
-    raw, _ = repository.create_session(conn, user["id"], 24)
-    conn.execute("UPDATE sessions SET expires_at = '2000-01-01 00:00:00'")
-
-    assert repository.get_session_user(conn, raw) is None
-
-
-def test_state_is_single_use(app_env, conn):
-    repository = app_env["app.repository"]
-    state = repository.create_state(conn, "http://localhost:3000/file")
-
-    row = repository.consume_state(conn, state)
-    assert row["redirect_to"] == "http://localhost:3000/file"
-    assert repository.consume_state(conn, state) is None
-
-
-def test_query_nodes_filters(app_env, conn):
-    repository = app_env["app.repository"]
-    figma = app_env["app.figma"]
-    from tests.conftest import FAKE_FILE
-
-    user = repository.upsert_user(conn, {"id": "1", "handle": "a"})
-    file_row = repository.save_structure(
-        conn, user["id"], "KEY", figma.build_structure(FAKE_FILE)
+    # 共通文（recommendation = 'any'）は判定によらず同じ
+    assert repository.get_templates(conn, "sell")["risk"] == (
+        repository.get_templates(conn, "hold")["risk"]
     )
 
-    assert len(repository.query_nodes(conn, file_row["id"], node_type="TEXT")) == 1
-    assert len(repository.query_nodes(conn, file_row["id"], parent_node_id="2:1")) == 2
-    assert len(repository.query_nodes(conn, file_row["id"], name_like="itl")) == 1
-    assert len(repository.query_nodes(conn, file_row["id"], max_depth=1)) == 2
+
+def test_history_is_trimmed(app_env, conn):
+    repository = app_env["app.repository"]
+
+    for i in range(5):
+        repository.save_diagnosis(
+            conn,
+            prefecture="東京都",
+            city=f"市{i}",
+            detail={},
+            recommendation="sell",
+            scores={"sell": 1.0, "rent": 2.0, "hold": 3.0},
+            sections={},
+        )
+    repository.trim_history(conn, 3)
+
+    rows = repository.list_diagnoses(conn, 10)
+    assert len(rows) == 3
+    assert [r["city"] for r in rows] == ["市4", "市3", "市2"]
