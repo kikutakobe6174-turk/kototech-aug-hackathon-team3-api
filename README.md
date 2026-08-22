@@ -32,13 +32,49 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env             # そのままでも動く
 
-python run.py                    # または uvicorn app.main:app --reload --port 8000
+python run.py
 ```
+
+> [!IMPORTANT]
+> **起動は `python run.py` を使うこと。**
+> `uvicorn app.main:app --reload` を直接叩くと、リポジトリ全体（`.venv` の
+> 3,000 ファイル超や `data/app.db` を含む）が監視対象になる。
+> git の切り替えやコミットでファイルが動くたびにサーバーが再起動し、
+> **その最中のリクエストは 502 になる**。
+> どうしても uvicorn を直接使うなら監視対象を絞る:
+>
+> ```bash
+> uvicorn app.main:app --reload --reload-dir app --port 8000
+> ```
+>
+> デモ中など、そもそも再起動されたくないときは自動リロードを切る:
+>
+> ```bash
+> RELOAD=false python run.py
+> ```
 
 > `python app/main.py` は動かない。`app` はパッケージで `main.py` が相対 import を
 > 使っているため、単体スクリプトとして実行すると
 > `attempted relative import with no known parent package` になる。
-> **リポジトリ直下から** `python run.py` か `uvicorn app.main:app` で起動する。
+> 必ずリポジトリ直下から起動する。
+
+### 画面のボタンで 502 が出るとき
+
+`POST /api/advice 502` は、**Next.js から Python API に届いていない**という意味
+（`src/app/api/advice/route.ts` が接続失敗時に返す）。
+API 側のバグではないので、まず API が生きているか確認する。
+
+```bash
+curl http://localhost:8000/health
+```
+
+- 応答が無い → API が起動していない。`python run.py` で起動する
+- 応答がある → フロントの `.env.local` の `API_BASE_URL` とポートが合っているか確認
+
+一度起動したのに落ちている場合、いちばん多いのは
+**`uvicorn --reload` がリポジトリ全体を監視していて、
+別の操作（git の切り替え、コミット、エディタの保存）で再起動が走った**ケース。
+`python run.py` なら監視対象が `app/` だけなので起きない。
 
 ### 起動しない / すぐ止まるとき
 

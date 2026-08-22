@@ -37,8 +37,14 @@ pytest
 `python app/main.py` は動かない（`app` はパッケージで、`main.py` が相対 import を
 使っているため）。必ずリポジトリ直下からパッケージとして読み込ませる。
 
-`run.py` は reload の監視対象を `app/` に絞っている。リポジトリ全体を見せると
-`.venv` の 3,000 ファイル超まで走査してしまうため。監視対象を広げないこと。
+`run.py` は reload の監視対象を `app/` に絞っている。**ここを広げないこと。**
+リポジトリ全体を監視すると `.venv` の 3,000 ファイル超や `data/app.db` まで対象になり、
+git の切り替えやコミットのたびにサーバーが再起動する。
+再起動中のリクエストは接続できず、フロントには 502 として出る（実測で確認済み）。
+
+`uvicorn app.main:app --reload` を直接案内しないこと。案内するなら必ず
+`--reload-dir app` を付ける。デモ用途なら `RELOAD=false python run.py`。
+
 起動前にポートの空きも確認する。埋まっていると uvicorn は
 `Application startup complete` の直後に黙って終了してしまい、原因が分かりにくい。
 
