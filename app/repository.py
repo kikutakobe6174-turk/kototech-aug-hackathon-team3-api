@@ -180,3 +180,59 @@ def trim_usecase_cache(conn: sqlite3.Connection, keep: int) -> None:
         """,
         (keep,),
     )
+
+
+# --- 解体費用 / 活用事例（出典ありの参照データ） -----------------------------
+
+def get_region_name(conn: sqlite3.Connection, prefecture: str) -> str | None:
+    row = conn.execute(
+        "SELECT region FROM prefecture_regions WHERE prefecture = ?", (prefecture,)
+    ).fetchone()
+    return row["region"] if row else None
+
+
+def get_demolition_cost(
+    conn: sqlite3.Connection, region: str | None, structure: str
+) -> int | None:
+    """地方 × 構造の解体坪単価（円/坪）。地方が不明なら全国平均で代替する。"""
+    if region:
+        row = conn.execute(
+            "SELECT cost_per_tsubo FROM demolition_costs WHERE region = ? AND structure = ?",
+            (region, structure),
+        ).fetchone()
+        if row:
+            return row["cost_per_tsubo"]
+    row = conn.execute(
+        """
+        SELECT CAST(AVG(cost_per_tsubo) AS INTEGER) AS cost
+          FROM demolition_costs WHERE structure = ?
+        """,
+        (structure,),
+    ).fetchone()
+    return row["cost"] if row and row["cost"] else None
+
+
+def pick_usecase_examples(
+    conn: sqlite3.Connection,
+    *,
+    prefecture: str,
+    region: str | None,
+    category: str | None,
+    limit: int = 4,
+) -> list[sqlite3.Row]:
+    """同じ都道府県 → 同じ地方 → 同じ分類 → その他、の優先順で事例を選ぶ。"""
+    return conn.execute(
+        """
+        SELECT *,
+               CASE
+                   WHEN prefecture = ?      THEN 0
+                   WHEN region = ?          THEN 1
+                   WHEN category = ?        THEN 2
+                   ELSE 3
+               END AS rank
+          FROM usecase_examples
+         ORDER BY rank, id
+         LIMIT ?
+        """,
+        (prefecture, region or "", category or "", limit),
+    ).fetchall()

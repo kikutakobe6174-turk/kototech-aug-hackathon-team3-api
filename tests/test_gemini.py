@@ -32,12 +32,56 @@ def test_prompt_contains_conditions_and_scores(app_env, factors):
     assert "公的統計の実測値ではありません" in prompt
 
 
-def test_system_instruction_forbids_fabricating_real_cases(app_env):
-    """「活用例」で実在の事例をでっち上げさせない。"""
+def test_system_instruction_restricts_to_given_examples(app_env):
+    """固有名詞は渡した参考事例のものだけ。作らせない。"""
     gemini = app_env["app.gemini"]
-    assert "実在の事例として書かないこと" in gemini.SYSTEM_INSTRUCTION
-    assert "地名・団体名・人名・年月は書かない" in gemini.SYSTEM_INSTRUCTION
-    assert "実在の事例ではなく" in gemini.DISCLAIMER
+    assert "【参考事例】に書かれたものだけ" in gemini.SYSTEM_INSTRUCTION
+    assert "作ってはいけない" in gemini.SYSTEM_INSTRUCTION
+    assert "改変しない" in gemini.SYSTEM_INSTRUCTION
+
+
+def test_prompt_embeds_reference_examples(app_env, factors):
+    gemini = app_env["app.gemini"]
+    advice = app_env["app.advice"]
+    examples = [
+        {
+            "title": "尾道空き家再生プロジェクト（尾道市）",
+            "prefecture": "広島県",
+            "category": "商業施設",
+            "summary": "斜面地の空き家をゲストハウスに再生。",
+            "numbers": "20件以上を改修",
+            "source_name": "自治体通信オンライン",
+            "source_url": "https://jichitai.works/articles/3296",
+        }
+    ]
+    prompt = gemini.build_prompt(
+        {}, factors(), advice.Scores(1, 2, 3), "sell", examples
+    )
+    assert "【参考事例】" in prompt
+    assert "尾道空き家再生プロジェクト（尾道市）" in prompt
+    assert "20件以上を改修" in prompt
+    assert "新しく作らないでください" in prompt
+
+
+def test_format_examples_includes_source(app_env):
+    gemini = app_env["app.gemini"]
+    examples = [
+        {
+            "title": "神山プロジェクト（神山町）",
+            "prefecture": "徳島県",
+            "category": "サテライトオフィス",
+            "summary": "空き家をIT企業のサテライトオフィスに転用。",
+            "numbers": "16社進出",
+            "source_name": "自治体通信オンライン",
+            "source_url": "https://jichitai.works/articles/3296",
+        }
+    ]
+    text = gemini.format_examples(examples)
+    assert text.startswith(gemini.DISCLAIMER)
+    assert "神山プロジェクト（神山町）" in text
+    assert "16社進出" in text
+    assert "https://jichitai.works/articles/3296" in text
+    assert gemini.format_examples([]) == ""
 
 
 # --- 応答のパース -----------------------------------------------------------
@@ -108,6 +152,8 @@ def test_prepends_disclaimer_and_logs(app_env, factors, caplog, monkeypatch):
     assert body.startswith(gemini.DISCLAIMER)
     assert "週末貸しの一軒家" in body
     assert "活用例（生成）" in caplog.text
+    # 出典はモデル任せにせず、必ずこちらで付ける
+    assert "出典:" not in body  # 事例を渡していないので出典行は付かない
     app_env["app.config"].get_settings.cache_clear()
 
 
@@ -176,14 +222,28 @@ def test_usecase_section_uses_generated_text(client, app_env, monkeypatch):
     app_env["app.config"].get_settings.cache_clear()
 
 
-def test_usecase_falls_back_to_template_without_key(client):
-    """キーが無くても usecase は空にならない。"""
-    body = client.post("/advice", json=SAMPLE_REQUEST).json()
+def test_usecase_shows_real_examples_without_key(client):
+    """キーが無くても、出典のある実例をそのまま出す。"""
+    usecase = client.post("/advice", json=SAMPLE_REQUEST).json()["sections"]["usecase"]
 
-    usecase = body["sections"]["usecase"]
     assert usecase.strip()
-    assert "一般的な活用パターン" in usecase
-    assert "古家付き土地" in usecase
+    assert "実際に行われた空き家活用の事例です" in usecase
+    assert "https://jichitai.works/articles/3296" in usecase
+    assert "出典:" in usecase
+
+
+def test_usecase_prefers_nearby_examples(client):
+    """近畿の物件なら、近畿の事例が先に出る。"""
+    kyoto = client.post(
+        "/advice", json={"prefecture": "京都府", "city": "京都市中京区", "detail": {}}
+    ).json()["sections"]["usecase"]
+    hiroshima = client.post(
+        "/advice", json={"prefecture": "広島県", "city": "広島市中区", "detail": {}}
+    ).json()["sections"]["usecase"]
+
+    # 広島県には尾道の事例があるので、必ず含まれる
+    assert "尾道空き家再生プロジェクト（尾道市）" in hiroshima
+    assert kyoto != hiroshima
 
 
 def test_usecase_falls_back_when_generation_fails(client, app_env, monkeypatch):
@@ -198,7 +258,8 @@ def test_usecase_falls_back_when_generation_fails(client, app_env, monkeypatch):
 
     res = client.post("/advice", json=SAMPLE_REQUEST)
     assert res.status_code == 200, res.text
-    assert "一般的な活用パターン" in res.json()["sections"]["usecase"]
+    usecase = res.json()["sections"]["usecase"]
+    assert "https://jichitai.works/articles/3296" in usecase
     app_env["app.config"].get_settings.cache_clear()
 
 
