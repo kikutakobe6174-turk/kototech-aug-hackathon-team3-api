@@ -52,6 +52,8 @@ class Settings:
     gemini_model: str
     gemini_api_revision: str
     gemini_timeout_seconds: float
+    usecase_cache_enabled: bool
+    usecase_cache_limit: int
 
     @property
     def gemini_enabled(self) -> bool:
@@ -80,4 +82,6 @@ def get_settings() -> Settings:
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
         gemini_api_revision=os.getenv("GEMINI_API_REVISION", "2026-05-20"),
         gemini_timeout_seconds=_float("GEMINI_TIMEOUT_SECONDS", 30.0),
+        usecase_cache_enabled=_bool("USECASE_CACHE", True),
+        usecase_cache_limit=_int("USECASE_CACHE_LIMIT", 500),
     )

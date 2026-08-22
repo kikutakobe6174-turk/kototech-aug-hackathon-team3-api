@@ -60,6 +60,18 @@ CREATE TABLE IF NOT EXISTS advice_templates (
 );
 CREATE INDEX IF NOT EXISTS idx_templates_section ON advice_templates(section_id);
 
+-- 「活用例」セクションの生成結果のキャッシュ。
+-- 同じ条件で何度も LLM を呼ばないようにする。
+CREATE TABLE IF NOT EXISTS usecase_cache (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    cache_key  TEXT NOT NULL UNIQUE,
+    prefecture TEXT NOT NULL,
+    city       TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- 診断の履歴。入力と結果をそのまま残す。
 CREATE TABLE IF NOT EXISTS diagnoses (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,

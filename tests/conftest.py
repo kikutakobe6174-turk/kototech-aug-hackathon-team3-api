@@ -12,6 +12,7 @@ FRONTEND_SECTION_IDS = (
     "sell",
     "rent",
     "hold",
+    "usecase",
     "market",
     "cost",
     "risk",

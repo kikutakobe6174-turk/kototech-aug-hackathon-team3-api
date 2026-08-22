@@ -11,6 +11,7 @@ def test_schema_tables_exist(conn):
         for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     assert {
+        "usecase_cache",
         "regions",
         "structure_factors",
         "property_type_factors",

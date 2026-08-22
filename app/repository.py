@@ -140,3 +140,43 @@ def list_diagnoses(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Ro
         """,
         (limit,),
     ).fetchall()
+
+
+# --- 活用例のキャッシュ -----------------------------------------------------
+
+def get_cached_usecase(conn: sqlite3.Connection, key: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM usecase_cache WHERE cache_key = ?", (key,)
+    ).fetchone()
+
+
+def save_usecase(
+    conn: sqlite3.Connection,
+    *,
+    key: str,
+    prefecture: str,
+    city: str,
+    model: str,
+    body: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO usecase_cache (cache_key, prefecture, city, model, body)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(cache_key) DO UPDATE SET
+            body       = excluded.body,
+            model      = excluded.model,
+            created_at = datetime('now')
+        """,
+        (key, prefecture, city, model, body),
+    )
+
+
+def trim_usecase_cache(conn: sqlite3.Connection, keep: int) -> None:
+    conn.execute(
+        """
+        DELETE FROM usecase_cache
+         WHERE id NOT IN (SELECT id FROM usecase_cache ORDER BY id DESC LIMIT ?)
+        """,
+        (keep,),
+    )

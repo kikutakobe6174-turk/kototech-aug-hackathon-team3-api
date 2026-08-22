@@ -17,6 +17,7 @@ SECTION_IDS: tuple[str, ...] = (
     "sell",
     "rent",
     "hold",
+    "usecase",
     "market",
     "cost",
     "risk",

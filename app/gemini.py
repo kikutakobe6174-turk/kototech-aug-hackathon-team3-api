@@ -1,4 +1,8 @@
-"""Gemini で「活用方法」を生成する。
+"""Gemini で「活用例」セクションの本文を生成する。
+
+フロントの `src/lib/sections.ts` にある `usecase`（活用例）に入る文章を作る。
+生成できなかったときは `advice_templates` のフォールバック文がそのまま使われるので、
+このモジュールは**例外を外に投げない**（`generate_usecase` は None を返す）。
 
 Interactions API を使う。
   POST https://generativelanguage.googleapis.com/v1beta/interactions
@@ -7,13 +11,11 @@ Interactions API を使う。
   応答    : output_text に本文が入る（無ければ steps を辿る）
 
 参考: https://ai.google.dev/gemini-api/docs/interactions/text-generation
-
-いまのところ結果はサーバーログに出すだけで、フロントへのレスポンスには含めない。
-生成内容を目視で確認してから組み込む段階のため。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -27,22 +29,50 @@ logger = logging.getLogger(__name__)
 
 INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 
+# 実在の事例だと誤解させないことを最優先にしている。
+# 固有名詞つきの「実例」を作らせると、検証できない情報を断定することになる。
 SYSTEM_INSTRUCTION = (
     "あなたは日本の空き家活用に詳しい不動産コンサルタントです。"
     "相談者は不動産の素人で、相続などで空き家を持て余しています。\n"
     "次を必ず守ってください。\n"
+    "- 実在の事例として書かないこと。具体的な地名・団体名・人名・年月は書かない。"
+    "「こういう条件ならこう活かせる」というモデルケースとして書く\n"
     "- 日本の制度（特定空家・管理不全空家の指定、空き家バンク、"
     "被相続人の居住用財産の3000万円特別控除、相続登記の義務化）を踏まえる\n"
     "- 具体的で、明日から着手できる粒度で書く\n"
     "- 金額や利回りは必ず「目安」と明記し、断定しない\n"
     "- 与えられた条件から言えないことは、推測せず「確認が必要」と書く\n"
     "- 専門用語には短い言い換えを添える\n"
-    "- 出力は日本語のプレーンテキスト。Markdown の見出し記法は使わない"
+    "- 出力は日本語のプレーンテキスト。Markdown の記法（#, *, -, ```）は使わない"
+)
+
+# 生成文の先頭に必ず付ける断り書き。モデルの出力に任せず、こちらで固定する。
+DISCLAIMER = (
+    "※ 以下は実在の事例ではなく、条件が近い空き家で取りうる活用のモデルケースです。"
+    "金額はいずれも目安で、実際の費用や収益は個別の条件で変わります。"
 )
 
 
 class GeminiError(RuntimeError):
     """Gemini の呼び出しに失敗したとき。"""
+
+
+def cache_key(
+    detail: dict[str, Any], factors: Factors, recommendation: str, model: str
+) -> str:
+    """同じ入力なら同じキーになるようにする。"""
+    payload = json.dumps(
+        {
+            "prefecture": factors.prefecture,
+            "city": factors.city,
+            "detail": detail,
+            "recommendation": recommendation,
+            "model": model,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def build_prompt(
@@ -51,13 +81,15 @@ def build_prompt(
     scores: Scores,
     recommendation: str,
 ) -> str:
-    """物件条件と診断結果から、活用方法を尋ねるプロンプトを組み立てる。"""
+    """物件条件と診断結果から、活用例を尋ねるプロンプトを組み立てる。"""
     label = {"sell": "売却", "rent": "賃貸", "hold": "保持"}.get(
         recommendation, recommendation
     )
 
     def line(name: str, value: Any, unit: str = "") -> str:
-        return f"- {name}: {value}{unit}" if value not in (None, "") else f"- {name}: 未入力"
+        if value in (None, ""):
+            return f"- {name}: 未入力"
+        return f"- {name}: {value}{unit}"
 
     conditions = "\n".join(
         [
@@ -81,7 +113,7 @@ def build_prompt(
     )
 
     return (
-        "次の空き家について、具体的な活用方法を提案してください。\n\n"
+        "次の空き家について、「活用例」として読ませる文章を書いてください。\n\n"
         f"【物件の条件】\n{conditions}\n\n"
         f"【エリアの参考値】\n{area_stats}\n"
         "※ これらの参考値は簡易モデルの概算であり、公的統計の実測値ではありません。\n\n"
@@ -89,17 +121,17 @@ def build_prompt(
         f"- 最有力: {label}\n"
         f"- スコア: 売却 {scores.sell} / 賃貸 {scores.rent} / 保持 {scores.hold}\n\n"
         "【依頼】\n"
-        "活用方法を 3〜5 個挙げてください。診断結果に引きずられすぎず、"
-        "条件から見て有望なものを選んでください。それぞれ次の形式で書いてください。\n\n"
-        "■ 活用方法の名前\n"
-        "  概要: （2〜3 文）\n"
-        "  想定初期費用: （目安。根拠となる前提も一言）\n"
-        "  期待できる効果: （収益・維持費削減・税負担など）\n"
-        "  向いている条件: \n"
-        "  注意点・リスク: \n"
-        "  最初の一歩: （誰に何を相談するか）\n\n"
-        "最後に「確認すべきこと」として、"
-        "判断のために追加で調べるべき項目を箇条書きで 3 つ挙げてください。"
+        "活用のモデルケースを 3〜4 個挙げてください。"
+        "診断結果に引きずられすぎず、条件から見て現実的なものを選んでください。"
+        "それぞれ次の形式で、この順番どおりに書いてください。\n\n"
+        "■ 活用例のタイトル\n"
+        "  どんな空き家か: （条件の要約を 1 文）\n"
+        "  やったこと: （2〜3 文）\n"
+        "  かかった費用の目安: （前提も一言添える）\n"
+        "  その後どうなったか: （収益・維持費・税負担の変化）\n"
+        "  この物件で試すなら: （最初に誰に何を相談するか）\n\n"
+        "最後に「この物件で確認すべきこと」として、"
+        "判断のために追加で調べるべき項目を 3 つ、箇条書きで挙げてください。"
     )
 
 
@@ -114,8 +146,7 @@ def _extract_text(payload: dict[str, Any]) -> str:
         if not isinstance(step, dict):
             continue
         # content.parts[].text / parts[].text のどちらの形でも拾えるようにする
-        containers = [step.get("content"), step]
-        for container in containers:
+        for container in (step.get("content"), step):
             if not isinstance(container, dict):
                 continue
             for part in container.get("parts") or []:
@@ -131,7 +162,7 @@ def _extract_text(payload: dict[str, Any]) -> str:
 
 
 async def generate(prompt: str) -> str:
-    """Gemini に問い合わせて本文を返す。"""
+    """Gemini に問い合わせて本文を返す。失敗時は GeminiError。"""
     settings = get_settings()
     if not settings.gemini_api_key:
         raise GeminiError("GEMINI_API_KEY が未設定です。")
@@ -155,7 +186,9 @@ async def generate(prompt: str) -> str:
             raise GeminiError(f"Gemini に接続できませんでした: {exc}") from exc
 
     if not res.is_success:
-        raise GeminiError(f"Gemini がエラーを返しました ({res.status_code}): {res.text[:500]}")
+        raise GeminiError(
+            f"Gemini がエラーを返しました ({res.status_code}): {res.text[:500]}"
+        )
 
     try:
         payload = res.json()
@@ -165,26 +198,42 @@ async def generate(prompt: str) -> str:
     return _extract_text(payload)
 
 
-async def log_utilization_ideas(
+def _log_result(area: str, recommendation: str, model: str, text: str, source: str) -> None:
+    logger.info(
+        "\n"
+        "========== 活用例（%s） ==========\n"
+        "対象: %s / 判定: %s / モデル: %s\n"
+        "-----------------------------------\n"
+        "%s\n"
+        "===================================",
+        source,
+        area,
+        recommendation,
+        model,
+        text,
+    )
+
+
+async def generate_usecase(
     detail: dict[str, Any],
     factors: Factors,
     scores: Scores,
     recommendation: str,
-) -> None:
-    """活用方法を生成してサーバーログに出す。
+) -> str | None:
+    """「活用例」の本文を返す。生成できなければ None（呼び出し側がフォールバック）。
 
-    バックグラウンドで動かす前提。ここで例外を投げてもリクエストには影響しないが、
-    握りつぶさずに必ずログへ残す。
+    ここでは例外を外へ出さない。活用例が出せないだけで診断全体を失敗させたくないため。
     """
     settings = get_settings()
     area = f"{factors.prefecture}{factors.city}"
+
     if not settings.gemini_enabled:
         logger.info(
             "[Gemini] スキップ（GEMINI_API_KEY が未設定）: %s / 判定=%s",
             area,
             recommendation,
         )
-        return
+        return None
 
     prompt = build_prompt(detail, factors, scores, recommendation)
     logger.debug("[Gemini] プロンプト:\n%s", prompt)
@@ -193,20 +242,16 @@ async def log_utilization_ideas(
         text = await generate(prompt)
     except GeminiError as exc:
         logger.warning("[Gemini] 生成に失敗: %s / %s", area, exc)
-        return
+        return None
     except Exception:  # pragma: no cover - 想定外は握りつぶさず記録する
         logger.exception("[Gemini] 想定外のエラー: %s", area)
-        return
+        return None
 
-    logger.info(
-        "\n"
-        "========== Gemini 活用方法 ==========\n"
-        "対象: %s / 判定: %s / モデル: %s\n"
-        "-------------------------------------\n"
-        "%s\n"
-        "=====================================",
-        area,
-        recommendation,
-        settings.gemini_model,
-        text,
-    )
+    body = f"{DISCLAIMER}\n\n{text}"
+    _log_result(area, recommendation, settings.gemini_model, body, "生成")
+    return body
+
+
+def log_cached(area: str, recommendation: str, model: str, text: str) -> None:
+    """キャッシュを使ったときもログには残す。"""
+    _log_result(area, recommendation, model, text, "キャッシュ")

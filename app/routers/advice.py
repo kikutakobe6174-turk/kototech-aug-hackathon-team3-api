@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from .. import advice as advice_logic
 from .. import gemini, repository
@@ -58,9 +58,8 @@ def _build_factors(
     response_model=AdviceResult,
     summary="入力条件から売却 / 賃貸 / 保持を診断する",
 )
-def create_advice(
+async def create_advice(
     body: AdviceRequest,
-    background: BackgroundTasks,
     conn: sqlite3.Connection = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> AdviceResult:
@@ -73,6 +72,15 @@ def create_advice(
         lambda recommendation: repository.get_templates(conn, recommendation),
     )
 
+    sections = dict(result.sections)
+    usecase = await _resolve_usecase(
+        conn, settings, detail, factors, result.scores, result.recommendation
+    )
+    if usecase:
+        # 生成できたときだけ差し替える。
+        # 失敗時は advice_templates のフォールバック文がそのまま残る。
+        sections["usecase"] = usecase
+
     if settings.save_history:
         repository.save_diagnosis(
             conn,
@@ -81,23 +89,47 @@ def create_advice(
             detail=detail,
             recommendation=result.recommendation,
             scores=result.scores.as_dict(),
-            sections=result.sections,
+            sections=sections,
         )
         repository.trim_history(conn, settings.history_limit)
 
-    # 活用方法の生成はレスポンスを待たせないようバックグラウンドで回し、
-    # 結果はいまのところサーバーログにだけ出す。
-    background.add_task(
-        gemini.log_utilization_ideas,
-        detail,
-        factors,
-        result.scores,
-        result.recommendation,
-    )
+    return AdviceResult(recommendation=result.recommendation, sections=sections)
 
-    return AdviceResult(
-        recommendation=result.recommendation, sections=result.sections
-    )
+
+async def _resolve_usecase(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    detail: dict,
+    factors: advice_logic.Factors,
+    scores: advice_logic.Scores,
+    recommendation: str,
+) -> str | None:
+    """「活用例」の本文を、キャッシュ → 生成 の順で用意する。"""
+    key = gemini.cache_key(detail, factors, recommendation, settings.gemini_model)
+
+    if settings.usecase_cache_enabled:
+        cached = repository.get_cached_usecase(conn, key)
+        if cached is not None:
+            gemini.log_cached(
+                f"{factors.prefecture}{factors.city}",
+                recommendation,
+                cached["model"],
+                cached["body"],
+            )
+            return cached["body"]
+
+    body = await gemini.generate_usecase(detail, factors, scores, recommendation)
+    if body and settings.usecase_cache_enabled:
+        repository.save_usecase(
+            conn,
+            key=key,
+            prefecture=factors.prefecture,
+            city=factors.city,
+            model=settings.gemini_model,
+            body=body,
+        )
+        repository.trim_usecase_cache(conn, settings.usecase_cache_limit)
+    return body
 
 
 @router.get("/advice/history", summary="診断履歴（動作確認用）")

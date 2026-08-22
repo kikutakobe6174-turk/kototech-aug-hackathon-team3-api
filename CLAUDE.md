@@ -51,12 +51,12 @@ app/
   seed.py         マスタデータ（相場・係数・本文テンプレート）
   repository.py   SQL はすべてここに閉じ込める
   advice.py       採点と本文組み立て（純関数。DB にも FastAPI にも依存しない）
-  gemini.py       活用方法の生成（Gemini Interactions API）。結果はログのみ
+  gemini.py       「活用例」の生成（Gemini Interactions API）
   models.py       pydantic のリクエスト / レスポンス
   main.py         アプリ生成・エラーハンドラ・ルーター登録
   routers/
     advice.py     POST /advice, GET /advice/history, GET /regions
-tests/            56 件
+tests/            61 件
 run.py            開発用の起動スクリプト
 docs/
   DATA_SOURCES.md 相場データの出典と、実データへの差し替え手順
@@ -79,7 +79,7 @@ docs/
 - レスポンスは `{ recommendation, sections }` の 2 キーだけ。
   `recommendation` は `"sell" | "rent" | "hold"`。
 - `sections` のキーは `src/lib/sections.ts` の `ADVICE_SECTIONS` の id と一致させる。
-  **8 セクションすべてを必ず埋める**。欠けると画面がプレースホルダのままになる。
+  **9 セクションすべてを必ず埋める**。欠けると画面がプレースホルダのままになる。
   この並びは `advice.SECTION_IDS` と `tests/conftest.py` の
   `FRONTEND_SECTION_IDS` の 2 か所で固定してある。
 - **エラーは必ず `{"error": "..."}`**。FastAPI 既定の `{"detail": ...}` のままだと
@@ -104,12 +104,19 @@ docs/
   都道府県自体が無ければ 400 を返す。
 - 本文テンプレートは `str.format_map` で埋める。未知のプレースホルダは
   `advice._Blanks` が `—` に置き換えるので、テンプレートのタイポで 500 にはならない。
-- 活用方法の生成（`gemini.py`）は **BackgroundTasks でレスポンス後に走らせる**。
-  診断の応答を LLM のレイテンシで待たせない。
-  失敗しても `/advice` は 200 のままにする（例外を外へ投げない）。
-  結果は**まだレスポンスに含めていない**。ログで内容を確認する段階。
-  組み込むときはフロントの `AdviceResult` を変える必要があるので、
-  必ず `src/lib/types.ts` と合わせて進める。
+- `sections.usecase` の本文だけ Gemini で生成し、レスポンスに載せている。
+  他のセクションはテンプレートのまま。
+- **`gemini.generate_usecase` は例外を外へ投げない**（失敗時は None）。
+  活用例が出せないだけで診断全体を落とさないため。
+  None のときは `advice_templates` のフォールバック文がそのまま残るので、
+  `usecase` が空になることはない。フォールバック文を消さないこと。
+- 同じ条件の生成結果は `usecase_cache` テーブルにキャッシュする。
+  キーは所在地・詳細・判定・モデル名のハッシュ（`gemini.cache_key`）。
+  モデル名をキーに含めているので、`GEMINI_MODEL` を変えれば自然に作り直される。
+- **「活用例」は実在の事例として書かせない。** 検証手段が無いため。
+  system instruction で固有名詞（地名・団体名・人名・年月）を禁止し、
+  `gemini.DISCLAIMER` をサーバー側で必ず先頭に付ける。
+  モデルの出力任せにしないこと。ここを緩めない。
 - ログは `main._configure_logging()` で UTF-8 に固定している。
   Windows だと標準出力が cp932 になり、リダイレクト時に日本語が化けるため。
 - `db.ensure_schema` がリクエストごとにテーブルの有無を確認し、無ければ作り直す。
