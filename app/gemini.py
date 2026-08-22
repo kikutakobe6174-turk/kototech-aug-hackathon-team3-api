@@ -1,8 +1,8 @@
-"""Gemini で「活用例」セクションの本文を生成する。
+"""Gemini で `usage`（どう活用するか）の本文を生成する。
 
-フロントの `src/lib/sections.ts` にある `usecase`（活用例）に入る文章を作る。
+フロント dev_simple の `AdviceResult.usage` に入る 1 本の文章を作る。
 生成できなかったときは `advice_templates` のフォールバック文がそのまま使われるので、
-このモジュールは**例外を外に投げない**（`generate_usecase` は None を返す）。
+このモジュールは**例外を外に投げない**（`generate_usage` は None を返す）。
 
 Interactions API を使う。
   POST https://generativelanguage.googleapis.com/v1beta/interactions
@@ -29,14 +29,16 @@ logger = logging.getLogger(__name__)
 
 INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 
-# 実在の事例だと誤解させないことを最優先にしている。
-# 固有名詞つきの「実例」を作らせると、検証できない情報を断定することになる。
+# 固有名詞は、こちらが渡した【参考事例】に載っているものだけを使わせる。
+# モデルに自由に書かせると、検証できない情報を事実として断定してしまう。
 SYSTEM_INSTRUCTION = (
     "あなたは日本の空き家活用に詳しい不動産コンサルタントです。"
     "相談者は不動産の素人で、相続などで空き家を持て余しています。\n"
     "次を必ず守ってください。\n"
-    "- 実在の事例として書かないこと。具体的な地名・団体名・人名・年月は書かない。"
-    "「こういう条件ならこう活かせる」というモデルケースとして書く\n"
+    "- 実在の事例は、プロンプトの【参考事例】に書かれたものだけを使うこと。"
+    "そこに無い自治体名・施設名・団体名・人名・数値を作ってはいけない\n"
+    "- 参考事例の自治体名・補助金額・実績は改変しない。"
+    "事実はそのまま引用し、この物件に当てはめるとどうかを自分の言葉で補う\n"
     "- 日本の制度（特定空家・管理不全空家の指定、空き家バンク、"
     "被相続人の居住用財産の3000万円特別控除、相続登記の義務化）を踏まえる\n"
     "- 具体的で、明日から着手できる粒度で書く\n"
@@ -46,11 +48,45 @@ SYSTEM_INSTRUCTION = (
     "- 出力は日本語のプレーンテキスト。Markdown の記法（#, *, -, ```）は使わない"
 )
 
-# 生成文の先頭に必ず付ける断り書き。モデルの出力に任せず、こちらで固定する。
+# 断り書きはモデルの出力に任せず、こちらで固定して付ける。
+# 「活用例」を列挙するとき（format_examples）に使う。
 DISCLAIMER = (
-    "※ 以下は実在の事例ではなく、条件が近い空き家で取りうる活用のモデルケースです。"
-    "金額はいずれも目安で、実際の費用や収益は個別の条件で変わります。"
+    "※ 以下は全国の自治体で実際に行われた空き家活用の事例です。"
+    "この物件に当てはめた場合の見通しは目安であり、"
+    "実際の費用や収益は個別の条件で変わります。"
 )
+
+# `usage` の文章の末尾に付ける。金額の出どころを誤解させないため。
+USAGE_NOTE = (
+    "※ 金額はいずれも簡易モデルによる目安です。"
+    "公的な統計データとは接続していないため、実際の査定額や賃料とは差が出ます。"
+)
+
+
+def source_note(examples: list[dict[str, Any]]) -> str:
+    """引用元を必ず本文に残す。"""
+    if not examples:
+        return ""
+    names = sorted({e["source_name"] for e in examples})
+    urls = sorted({e["source_url"] for e in examples})
+    return "\n\n出典: " + " / ".join(names) + "\n" + "\n".join(urls)
+
+
+def format_examples(examples: list[dict[str, Any]]) -> str:
+    """LLM を使わないときの「活用例」本文。実例をそのまま並べる。"""
+    if not examples:
+        return ""
+    blocks = []
+    for example in examples:
+        block = (
+            f"■ {example['title']}\n"
+            f"  分類: {example['category']}\n"
+            f"  内容: {example['summary']}"
+        )
+        if example.get("numbers"):
+            block += f"\n  実績・数値: {example['numbers']}"
+        blocks.append(block)
+    return DISCLAIMER + "\n\n" + "\n\n".join(blocks) + source_note(examples)
 
 
 class GeminiError(RuntimeError):
@@ -75,13 +111,25 @@ def cache_key(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _format_examples_for_prompt(examples: list[dict[str, Any]]) -> str:
+    lines = []
+    for example in examples:
+        lines.append(
+            f"- {example['title']}（{example['prefecture']} / {example['category']}）\n"
+            f"  {example['summary']}\n"
+            f"  実績・数値: {example.get('numbers') or '記載なし'}"
+        )
+    return "\n".join(lines)
+
+
 def build_prompt(
     detail: dict[str, Any],
     factors: Factors,
     scores: Scores,
     recommendation: str,
+    examples: list[dict[str, Any]] | None = None,
 ) -> str:
-    """物件条件と診断結果から、活用例を尋ねるプロンプトを組み立てる。"""
+    """物件条件・診断結果・実在の参考事例から、活用例のプロンプトを組み立てる。"""
     label = {"sell": "売却", "rent": "賃貸", "hold": "保持"}.get(
         recommendation, recommendation
     )
@@ -112,26 +160,29 @@ def build_prompt(
         ]
     )
 
+    reference = _format_examples_for_prompt(examples or [])
+
     return (
-        "次の空き家について、「活用例」として読ませる文章を書いてください。\n\n"
+        "次の空き家について、診断結果の下に載せる「活用方法」の文章を書いてください。\n\n"
         f"【物件の条件】\n{conditions}\n\n"
         f"【エリアの参考値】\n{area_stats}\n"
         "※ これらの参考値は簡易モデルの概算であり、公的統計の実測値ではありません。\n\n"
         "【こちらの簡易診断の結果】\n"
         f"- 最有力: {label}\n"
         f"- スコア: 売却 {scores.sell} / 賃貸 {scores.rent} / 保持 {scores.hold}\n\n"
+        "【参考事例】（実在の事例。ここに書かれた事実だけを使うこと）\n"
+        f"{reference or '（該当する事例がありません）'}\n\n"
         "【依頼】\n"
-        "活用のモデルケースを 3〜4 個挙げてください。"
-        "診断結果に引きずられすぎず、条件から見て現実的なものを選んでください。"
-        "それぞれ次の形式で、この順番どおりに書いてください。\n\n"
-        "■ 活用例のタイトル\n"
-        "  どんな空き家か: （条件の要約を 1 文）\n"
-        "  やったこと: （2〜3 文）\n"
-        "  かかった費用の目安: （前提も一言添える）\n"
-        "  その後どうなったか: （収益・維持費・税負担の変化）\n"
-        "  この物件で試すなら: （最初に誰に何を相談するか）\n\n"
-        "最後に「この物件で確認すべきこと」として、"
-        "判断のために追加で調べるべき項目を 3 つ、箇条書きで挙げてください。"
+        f"「{label}」を選んだ前提で、この空き家をどう活用するかを説明してください。\n"
+        "画面では見出しの下に 1 本の文章として表示されます。"
+        "見出し記法は使えないので、段落と改行だけで組み立ててください。\n\n"
+        "次の順番で、全体 600〜900 字程度にまとめてください。\n"
+        f"1. なぜ「{label}」が向いているのか（条件と数値を根拠に 2〜3 文）\n"
+        "2. 具体的にどう進めるか（費用や賃料の目安を添える。必ず「目安」と明記）\n"
+        "3. 参考事例のうち、この物件に近いものを 1〜2 件だけ引いて、"
+        "何が参考になるかを説明する（自治体名と数値は参考事例のとおりに引用する）\n"
+        "4. 最初の一歩（誰に何を相談するか）\n\n"
+        "**参考事例に無い自治体名・施設名・数値を新しく作らないでください。**"
     )
 
 
@@ -201,7 +252,7 @@ async def generate(prompt: str) -> str:
 def _log_result(area: str, recommendation: str, model: str, text: str, source: str) -> None:
     logger.info(
         "\n"
-        "========== 活用例（%s） ==========\n"
+        "========== 活用方法（%s） ==========\n"
         "対象: %s / 判定: %s / モデル: %s\n"
         "-----------------------------------\n"
         "%s\n"
@@ -214,15 +265,16 @@ def _log_result(area: str, recommendation: str, model: str, text: str, source: s
     )
 
 
-async def generate_usecase(
+async def generate_usage(
     detail: dict[str, Any],
     factors: Factors,
     scores: Scores,
     recommendation: str,
+    examples: list[dict[str, Any]] | None = None,
 ) -> str | None:
-    """「活用例」の本文を返す。生成できなければ None（呼び出し側がフォールバック）。
+    """`usage` の本文を返す。生成できなければ None（呼び出し側がフォールバック）。
 
-    ここでは例外を外へ出さない。活用例が出せないだけで診断全体を失敗させたくないため。
+    ここでは例外を外へ出さない。文章が出せないだけで診断全体を失敗させたくないため。
     """
     settings = get_settings()
     area = f"{factors.prefecture}{factors.city}"
@@ -235,7 +287,7 @@ async def generate_usecase(
         )
         return None
 
-    prompt = build_prompt(detail, factors, scores, recommendation)
+    prompt = build_prompt(detail, factors, scores, recommendation, examples)
     logger.debug("[Gemini] プロンプト:\n%s", prompt)
 
     try:
@@ -247,7 +299,8 @@ async def generate_usecase(
         logger.exception("[Gemini] 想定外のエラー: %s", area)
         return None
 
-    body = f"{DISCLAIMER}\n\n{text}"
+    # 断り書きと出典はモデル任せにせず、必ずこちらで付ける。
+    body = f"{text}\n\n{USAGE_NOTE}{source_note(examples or [])}"
     _log_result(area, recommendation, settings.gemini_model, body, "生成")
     return body
 

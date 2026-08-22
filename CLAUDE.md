@@ -37,8 +37,14 @@ pytest
 `python app/main.py` は動かない（`app` はパッケージで、`main.py` が相対 import を
 使っているため）。必ずリポジトリ直下からパッケージとして読み込ませる。
 
-`run.py` は reload の監視対象を `app/` に絞っている。リポジトリ全体を見せると
-`.venv` の 3,000 ファイル超まで走査してしまうため。監視対象を広げないこと。
+`run.py` は reload の監視対象を `app/` に絞っている。**ここを広げないこと。**
+リポジトリ全体を監視すると `.venv` の 3,000 ファイル超や `data/app.db` まで対象になり、
+git の切り替えやコミットのたびにサーバーが再起動する。
+再起動中のリクエストは接続できず、フロントには 502 として出る（実測で確認済み）。
+
+`uvicorn app.main:app --reload` を直接案内しないこと。案内するなら必ず
+`--reload-dir app` を付ける。デモ用途なら `RELOAD=false python run.py`。
+
 起動前にポートの空きも確認する。埋まっていると uvicorn は
 `Application startup complete` の直後に黙って終了してしまい、原因が分かりにくい。
 
@@ -48,15 +54,17 @@ pytest
 app/
   config.py       環境変数 → Settings（frozen dataclass, lru_cache）
   db.py           sqlite3 接続と SCHEMA（テーブル定義はすべてここ）
-  seed.py         マスタデータ（相場・係数・本文テンプレート）
+  seed.py         マスタデータ（相場・係数・本文テンプレート）※出典なしの仮値
+  usage_templates.py dev_simple 用 `usage` のテンプレート（判定ごと）
+  reference_data.py 出典のある実データ（活用事例・解体費用）
   repository.py   SQL はすべてここに閉じ込める
   advice.py       採点と本文組み立て（純関数。DB にも FastAPI にも依存しない）
-  gemini.py       「活用例」の生成（Gemini Interactions API）
+  gemini.py       `usage` の生成（Gemini Interactions API）
   models.py       pydantic のリクエスト / レスポンス
   main.py         アプリ生成・エラーハンドラ・ルーター登録
   routers/
     advice.py     POST /advice, GET /advice/history, GET /regions
-tests/            61 件
+tests/            77 件
 run.py            開発用の起動スクリプト
 docs/
   DATA_SOURCES.md 相場データの出典と、実データへの差し替え手順
@@ -67,8 +75,11 @@ docs/
 - **SQL は `repository.py` だけ**。ルーターに SQL を書かない。
 - **テーブル定義は `db.SCHEMA` だけ**。`CREATE TABLE IF NOT EXISTS` で書き、
   `init_db()` が何度走っても同じ状態になるようにする。
-- **マスタの値は `seed.py` だけ**。相場を更新したいときはここだけ直す。
+- **マスタの値は `seed.py` と `reference_data.py` だけ**。
   投入は `ON CONFLICT ... DO UPDATE` なので再実行で行が増えない。
+  **2 つを混ぜないこと**: `reference_data.py` は出典のある実データ
+  （活用事例・解体費用）、`seed.py` は出典のない手書きの仮値。
+  新しいデータを足すときも、出典の有無で置き場所を分ける。
 - **`advice.py` は純関数**。係数は呼び出し側が SQLite から読んで `Factors` に詰める。
   ここにテストが集まっているので、DB や HTTP を持ち込まない。
 
@@ -76,8 +87,16 @@ docs/
 
 - エンドポイントは `POST /advice`。パスは `route.ts` の `ADVICE_PATH` で決まっている。
 - リクエスト / レスポンスのキーは **snake_case のまま**。camelCase に変換しない。
-- レスポンスは `{ recommendation, sections }` の 2 キーだけ。
-  `recommendation` は `"sell" | "rent" | "hold"`。
+- **フロントは 2 系統ある。両方が読める形で返す。**
+  - `dev_simple`（`~/ienomirai_front_branch`）… `{ recommendation, usage }` を読む
+  - `master`（`~/ienomirai_front`）… `{ recommendation, sections }` を読む
+  どちらも余分なキーは無視するので、両方入れておけば片方を壊さない。
+  片方を消すときは、対応するフロントが無くなったことを確認してから。
+- `recommendation` は `"sell" | "rent" | "hold"`。
+- `usage` は 1 本の文章。画面では `whitespace-pre-wrap` で表示されるため、
+  Markdown は効かない。改行と全角記号だけで組み立てる。
+  判定ごとのテンプレートは `app/usage_templates.py`。
+  **空文字を返さないこと**（画面に何も出なくなる）。
 - `sections` のキーは `src/lib/sections.ts` の `ADVICE_SECTIONS` の id と一致させる。
   **9 セクションすべてを必ず埋める**。欠けると画面がプレースホルダのままになる。
   この並びは `advice.SECTION_IDS` と `tests/conftest.py` の
@@ -113,10 +132,13 @@ docs/
 - 同じ条件の生成結果は `usecase_cache` テーブルにキャッシュする。
   キーは所在地・詳細・判定・モデル名のハッシュ（`gemini.cache_key`）。
   モデル名をキーに含めているので、`GEMINI_MODEL` を変えれば自然に作り直される。
-- **「活用例」は実在の事例として書かせない。** 検証手段が無いため。
-  system instruction で固有名詞（地名・団体名・人名・年月）を禁止し、
-  `gemini.DISCLAIMER` をサーバー側で必ず先頭に付ける。
+- **固有名詞は `usecase_examples` の実データだけを使わせる。**
+  Gemini には【参考事例】として渡すだけで、そこに無い自治体名・施設名・
+  補助金額を作らせない（system instruction で明示）。
+  `gemini.DISCLAIMER` と `gemini.source_note()` はサーバー側で必ず付ける。
   モデルの出力任せにしないこと。ここを緩めない。
+- Gemini が使えないときは `gemini.format_examples()` で実例をそのまま出す。
+  `advice_templates` の汎用文まで落ちるのは事例が 1 件も無いときだけ。
 - ログは `main._configure_logging()` で UTF-8 に固定している。
   Windows だと標準出力が cp932 になり、リダイレクト時に日本語が化けるため。
 - `db.ensure_schema` がリクエストごとにテーブルの有無を確認し、無ければ作り直す。

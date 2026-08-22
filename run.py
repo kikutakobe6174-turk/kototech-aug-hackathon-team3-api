@@ -66,11 +66,26 @@ def main() -> int:
         )
         return 1
 
+    reload_enabled = _bool("RELOAD", True)
+    print(
+        "----------------------------------------------------------\n"
+        f" API        : http://{host}:{port}\n"
+        f" ドキュメント: http://{host}:{port}/docs\n"
+        f" 自動リロード: {'あり（app/ のみ監視）' if reload_enabled else 'なし'}\n"
+        " フロント側の .env.local に\n"
+        f"   API_BASE_URL=http://{host}:{port}\n"
+        " が入っているか確認してください。\n"
+        "----------------------------------------------------------",
+        # ログをファイルにリダイレクトするとブロックバッファされ、
+        # 起動時にバナーが出ないので明示的に流す。
+        flush=True,
+    )
+
     uvicorn.run(
         "app.main:app",
         host=host,
         port=port,
-        reload=_bool("RELOAD", True),
+        reload=reload_enabled,
         reload_dirs=RELOAD_DIRS,
         reload_excludes=RELOAD_EXCLUDES,
     )

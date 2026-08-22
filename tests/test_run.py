@@ -52,3 +52,42 @@ def test_main_starts_uvicorn_with_narrow_reload_dirs(monkeypatch):
     assert run.main() == 0
     assert captured["reload_dirs"] == ["app"]
     assert "*.db" in captured["reload_excludes"]
+
+
+def test_reload_excludes_cover_generated_files(monkeypatch, capsys):
+    """data/*.db やリポジトリ全体の変更で再起動しない設定であること。
+
+    ここを広げると、git の切り替えやコミットのたびにサーバーが再起動し、
+    その最中のリクエストがフロント側で 502 になる。
+    """
+    monkeypatch.setattr(run, "_port_is_taken", lambda host, port: False)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(run.uvicorn, "run", lambda *a, **k: captured.update(k))
+
+    assert run.main() == 0
+    # 監視するのは app/ だけ。リポジトリ直下（.venv を含む）は見ない
+    assert captured["reload_dirs"] == ["app"]
+    excludes = captured["reload_excludes"]
+    for pattern in ("*.db", "data/*", ".venv/*", ".git/*"):
+        assert pattern in excludes
+
+
+def test_banner_shows_url_and_reload_scope(monkeypatch, capsys):
+    monkeypatch.setattr(run, "_port_is_taken", lambda host, port: False)
+    monkeypatch.setattr(run.uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setenv("PORT", "8000")
+
+    run.main()
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:8000" in out
+    assert "app/ のみ監視" in out
+    assert "API_BASE_URL=http://127.0.0.1:8000" in out
+
+
+def test_banner_reports_reload_disabled(monkeypatch, capsys):
+    monkeypatch.setattr(run, "_port_is_taken", lambda host, port: False)
+    monkeypatch.setattr(run.uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setenv("RELOAD", "false")
+
+    run.main()
+    assert "自動リロード: なし" in capsys.readouterr().out

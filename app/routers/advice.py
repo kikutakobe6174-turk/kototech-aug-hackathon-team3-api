@@ -33,6 +33,9 @@ def _build_factors(
     structure = repository.get_structure_factor(conn, body.detail.structure)
     property_type = repository.get_property_type_factor(conn, body.detail.property_type)
 
+    region_name = repository.get_region_name(conn, body.prefecture)
+    demolition = repository.get_demolition_cost(conn, region_name, structure["structure"])
+
     return advice_logic.Factors(
         prefecture=body.prefecture,
         city=body.city,
@@ -50,6 +53,8 @@ def _build_factors(
         rent_weight=property_type["rent_weight"],
         hold_weight=property_type["hold_weight"],
         rentable=bool(property_type["rentable"]),
+        region_name=region_name or "",
+        demolition_cost_per_tsubo=demolition or 0,
     )
 
 
@@ -72,14 +77,19 @@ async def create_advice(
         lambda recommendation: repository.get_templates(conn, recommendation),
     )
 
+    examples = _load_examples(conn, body, factors)
     sections = dict(result.sections)
-    usecase = await _resolve_usecase(
-        conn, settings, detail, factors, result.scores, result.recommendation
+    # master ブランチのフロント用。実例をそのまま並べる。
+    formatted = gemini.format_examples(examples)
+    if formatted:
+        sections["usecase"] = formatted
+
+    # dev_simple ブランチのフロント用の 1 本の文章。
+    usage = await _resolve_usage(
+        conn, settings, detail, factors, result.scores, result.recommendation, examples
     )
-    if usecase:
-        # 生成できたときだけ差し替える。
-        # 失敗時は advice_templates のフォールバック文がそのまま残る。
-        sections["usecase"] = usecase
+    if not usage:
+        usage = _fallback_usage(result.usage, formatted)
 
     if settings.save_history:
         repository.save_diagnosis(
@@ -93,18 +103,50 @@ async def create_advice(
         )
         repository.trim_history(conn, settings.history_limit)
 
-    return AdviceResult(recommendation=result.recommendation, sections=sections)
+    return AdviceResult(
+        recommendation=result.recommendation, usage=usage, sections=sections
+    )
 
 
-async def _resolve_usecase(
+# 判定 → 事例分類の対応。優先的に拾う分類を決めるだけで、絞り込みはしない。
+CATEGORY_FOR: dict[str, str] = {
+    "rent": "賃貸住宅",
+    "hold": "地域拠点",
+    "sell": "商業施設",
+}
+
+
+def _load_examples(
+    conn: sqlite3.Connection, request: AdviceRequest, factors: advice_logic.Factors
+) -> list[dict]:
+    """出典のある活用事例を、地域が近いものから選ぶ。"""
+    rows = repository.pick_usecase_examples(
+        conn,
+        prefecture=request.prefecture,
+        region=factors.region_name or None,
+        category=CATEGORY_FOR.get(factors.property_type_name, None),
+    )
+    return [dict(row) for row in rows]
+
+
+def _fallback_usage(template_body: str, formatted_examples: str) -> str:
+    """LLM が使えないときの `usage`。テンプレート文 + 実例。"""
+    parts = [
+        part for part in (template_body.strip(), formatted_examples.strip()) if part
+    ]
+    return "\n\n".join(parts)
+
+
+async def _resolve_usage(
     conn: sqlite3.Connection,
     settings: Settings,
     detail: dict,
     factors: advice_logic.Factors,
     scores: advice_logic.Scores,
     recommendation: str,
+    examples: list[dict],
 ) -> str | None:
-    """「活用例」の本文を、キャッシュ → 生成 の順で用意する。"""
+    """`usage` の本文を、キャッシュ → 生成 の順で用意する。"""
     key = gemini.cache_key(detail, factors, recommendation, settings.gemini_model)
 
     if settings.usecase_cache_enabled:
@@ -118,7 +160,9 @@ async def _resolve_usecase(
             )
             return cached["body"]
 
-    body = await gemini.generate_usecase(detail, factors, scores, recommendation)
+    body = await gemini.generate_usage(
+        detail, factors, scores, recommendation, examples
+    )
     if body and settings.usecase_cache_enabled:
         repository.save_usecase(
             conn,

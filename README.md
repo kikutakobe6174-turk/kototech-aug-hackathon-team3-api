@@ -32,13 +32,49 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env             # そのままでも動く
 
-python run.py                    # または uvicorn app.main:app --reload --port 8000
+python run.py
 ```
+
+> [!IMPORTANT]
+> **起動は `python run.py` を使うこと。**
+> `uvicorn app.main:app --reload` を直接叩くと、リポジトリ全体（`.venv` の
+> 3,000 ファイル超や `data/app.db` を含む）が監視対象になる。
+> git の切り替えやコミットでファイルが動くたびにサーバーが再起動し、
+> **その最中のリクエストは 502 になる**。
+> どうしても uvicorn を直接使うなら監視対象を絞る:
+>
+> ```bash
+> uvicorn app.main:app --reload --reload-dir app --port 8000
+> ```
+>
+> デモ中など、そもそも再起動されたくないときは自動リロードを切る:
+>
+> ```bash
+> RELOAD=false python run.py
+> ```
 
 > `python app/main.py` は動かない。`app` はパッケージで `main.py` が相対 import を
 > 使っているため、単体スクリプトとして実行すると
 > `attempted relative import with no known parent package` になる。
-> **リポジトリ直下から** `python run.py` か `uvicorn app.main:app` で起動する。
+> 必ずリポジトリ直下から起動する。
+
+### 画面のボタンで 502 が出るとき
+
+`POST /api/advice 502` は、**Next.js から Python API に届いていない**という意味
+（`src/app/api/advice/route.ts` が接続失敗時に返す）。
+API 側のバグではないので、まず API が生きているか確認する。
+
+```bash
+curl http://localhost:8000/health
+```
+
+- 応答が無い → API が起動していない。`python run.py` で起動する
+- 応答がある → フロントの `.env.local` の `API_BASE_URL` とポートが合っているか確認
+
+一度起動したのに落ちている場合、いちばん多いのは
+**`uvicorn --reload` がリポジトリ全体を監視していて、
+別の操作（git の切り替え、コミット、エディタの保存）で再起動が走った**ケース。
+`python run.py` なら監視対象が `app/` だけなので起きない。
 
 ### 起動しない / すぐ止まるとき
 
@@ -93,8 +129,35 @@ Get-NetTCPConnection -LocalPort 8000 -State Listen |
 }
 ```
 
-レスポンス（`AdviceResult`）。`sections` のキーは
-`src/lib/sections.ts` の `ADVICE_SECTIONS` の id と一致する。
+レスポンス（`AdviceResult`）。**フロントに 2 系統あるので両方が読める形で返す。**
+
+| フロントのブランチ | 読むキー | ローカルの場所 |
+| --- | --- | --- |
+| `dev_simple` | `recommendation` + **`usage`** | `~/ienomirai_front_branch` |
+| `master` | `recommendation` + `sections` | `~/ienomirai_front` |
+
+どちらも余分なキーは無視するので、両方入れておけば片方を壊さない。
+
+```jsonc
+{
+  "recommendation": "rent",
+  "usage": "京都府京都市中京区のこの物件は、貸して収益を得ながら…（1 本の文章）",
+  "sections": { "summary": "…", "sell": "…", "usecase": "…" }
+}
+```
+
+### usage（dev_simple 用）
+
+見出しの下に 1 本の文章として `whitespace-pre-wrap` で表示される。
+Markdown は効かないので、改行と全角記号だけで組み立てている。
+判定ごとのテンプレートは `app/usage_templates.py`。
+
+Gemini が使える場合は、実在の活用事例を参考資料として渡して生成させる。
+使えない場合はテンプレート文 + 実例をそのまま並べる。**空になることはない。**
+
+### sections（master 用）
+
+`sections` のキーは `src/lib/sections.ts` の `ADVICE_SECTIONS` の id と一致する。
 
 ```jsonc
 {
@@ -164,10 +227,18 @@ DB ファイルは `DATABASE_PATH`（既定 `./data/app.db`）。
 市区町村レベルの行は主要 12 地点のみ登録済みで、
 未登録の市区町村は都道府県のデフォルト値にフォールバックする。
 
-## 「活用例」の生成（Gemini）
+## 「活用例」（出典のある実例 + Gemini）
 
-`sections.usecase`（画面の「活用例」）の本文を Gemini に生成させて**レスポンスに載せる**。
-それ以外のセクションはテンプレートのまま。
+`sections.usecase`（画面の「活用例」）は、
+**全国の自治体で実際に行われた空き家活用の事例 15 件**をもとに組み立てる。
+出典は[自治体通信オンライン](https://jichitai.works/articles/3296)。
+自治体名・補助金額・成約実績をそのまま `usecase_examples` テーブルに持っている。
+
+物件の都道府県 → 同じ地方 → その他、の優先順で事例を 4 件選ぶ。
+
+Gemini が使える場合は、その事例を**参考資料として渡し**、この物件に当てはめた
+解説を書かせる。事例に無い自治体名・施設名・数値を作らせないよう
+system instruction で縛り、出典行はサーバー側で必ず付ける。
 
 `.env` に API キーを入れると有効になる。**キーが無くても API は普通に動く**（後述のフォールバック）。
 
@@ -197,17 +268,16 @@ LOG_ENCODING=utf-8      # ターミナルが cp932 なら cp932
 
 ### 生成できないときのフォールバック
 
-`usecase` セクションが**空になることはない**。生成できなければ
-`advice_templates` の一般的な活用パターン（古家付き土地として売却、最低限の修繕をして賃貸、
-解体して土地活用、空き家バンク登録）がそのまま入る。
+`usecase` セクションが**空になることはない**。
+Gemini が使えなくても、選んだ実例をそのまま整形して出す。
 
 | 状況 | ログ | `sections.usecase` |
 | --- | --- | --- |
-| キー未設定 | `[Gemini] スキップ（GEMINI_API_KEY が未設定）` | フォールバック文 |
-| 生成失敗（429 / 400 など） | `[Gemini] 生成に失敗: ... (400): ...` | フォールバック文 |
-| 成功 | `========== 活用例（生成） ==========` | 生成文 |
+| キー未設定 | `[Gemini] スキップ（GEMINI_API_KEY が未設定）` | 実例をそのまま整形（出典付き） |
+| 生成失敗（429 / 400 など） | `[Gemini] 生成に失敗: ... (400): ...` | 同上 |
+| 成功 | `========== 活用例（生成） ==========` | 実例に基づく生成文（出典付き） |
 
-いずれの場合も `/advice` は **200** を返す。
+いずれの場合も `/advice` は **200** を返し、出典 URL が本文に入る。
 
 ### キャッシュ
 
@@ -217,11 +287,37 @@ LLM を呼ばない。デモで同じ入力を繰り返しても待たされず�
 
 ### 事実性について
 
-「活用例」の lead は「実際にどう活かされたかの事例」だが、
-**実在の事例を検証する手段が無いため、モデルケースとして生成している。**
-system instruction で固有名詞（地名・団体名・人名・年月）を禁止し、
-本文の先頭に「実在の事例ではありません」という断り書きを
-サーバー側で必ず付与している（モデルの出力任せにしていない）。
+固有名詞（自治体名・事業名・補助金額・実績）は
+**`usecase_examples` テーブルにある実データだけ**を使う。
+Gemini には参考資料として渡すだけで、そこに無いものを作らせない。
+断り書きと出典行はサーバー側で必ず付与する（モデルの出力任せにしていない）。
+
+## 売却：そのまま売る / 解体して売る
+
+`sections.sell` では 2 通りを金額付きで比較する。
+
+- **【A】現況のまま売る** — 土地値 + 建物の残存価値
+- **【B】解体して更地で売る** — 土地値 − 解体費用
+
+解体費の坪単価は地方 × 構造で引く（`demolition_costs` テーブル）。
+出典は[スッキリ解体](https://sukkiri-kaitai.com/kaitai-hiyou/kaitaihiyo-mokuzo/)で、
+あんしん解体業者認定協会の 2020〜2024 年・30,000 件以上の工事データが元。
+地域の業者は <https://sukkiri-kaitai.com/kaitaikoujigyousya/> から探せる。
+
+```
+【B】解体して更地で売る
+  解体費用の目安: 約 102 万円（中国・四国の木造で坪あたり約 29,038 円）
+  解体後の手残り: 約 2,068 万円
+```
+
+建物にまだ価値が残っている（残存価値 50% 以上）なら現況のまま、
+そうでなければ手残りの差額で有利なほうを提示する。
+1 月 1 日時点で更地だと住宅用地特例（固定資産税 1/6）が外れる点も明記している。
+
+> [!NOTE]
+> 出典が公表しているのは「木造の地方別」と「構造別の全国平均」の 2 つだけ。
+> 地方 × 構造の値は木造の地域差を比率として掛けた**導出値**。
+> 詳細は [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md)。
 
 使っているのは Interactions API
 （`POST https://generativelanguage.googleapis.com/v1beta/interactions`、
@@ -240,7 +336,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-61 件。フロントとの契約（セクション id、レスポンスの形、エラーの形）を
+72 件。フロントとの契約（セクション id、レスポンスの形、エラーの形）を
 `tests/test_api.py` で固定してある。
 `src/lib/sections.ts` を変更したら `tests/conftest.py` の
 `FRONTEND_SECTION_IDS` も合わせて直すこと。

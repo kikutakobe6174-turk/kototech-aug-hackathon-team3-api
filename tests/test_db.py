@@ -71,7 +71,8 @@ def test_templates_cover_every_section(app_env, conn):
 
     for recommendation in ("sell", "rent", "hold"):
         templates = repository.get_templates(conn, recommendation)
-        assert set(templates) == set(FRONTEND_SECTION_IDS), recommendation
+        # セクションに加えて、dev_simple 用の usage テンプレートも入る
+        assert set(templates) == set(FRONTEND_SECTION_IDS) | {"usage"}, recommendation
 
 
 def test_recommendation_specific_template_wins(app_env, conn):
@@ -106,3 +107,65 @@ def test_history_is_trimmed(app_env, conn):
     rows = repository.list_diagnoses(conn, 10)
     assert len(rows) == 3
     assert [r["city"] for r in rows] == ["市4", "市3", "市2"]
+
+
+# --- 出典ありの参照データ ---------------------------------------------------
+
+def test_reference_tables_are_seeded(app_env, conn):
+    counts = {
+        t: conn.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"]
+        for t in ("prefecture_regions", "demolition_costs", "usecase_examples")
+    }
+    assert counts["prefecture_regions"] == 47
+    assert counts["demolition_costs"] == 6 * 5  # 6 地方 × 5 構造
+    assert counts["usecase_examples"] == 15
+
+
+def test_reference_seed_is_idempotent(app_env, conn):
+    db = app_env["app.db"]
+    before = conn.execute("SELECT COUNT(*) c FROM usecase_examples").fetchone()["c"]
+    db.init_db(conn)
+    db.init_db(conn)
+    assert conn.execute("SELECT COUNT(*) c FROM usecase_examples").fetchone()["c"] == before
+
+
+def test_region_mapping(app_env, conn):
+    repository = app_env["app.repository"]
+    assert repository.get_region_name(conn, "京都府") == "近畿"
+    assert repository.get_region_name(conn, "北海道") == "北海道・東北"
+    assert repository.get_region_name(conn, "架空県") is None
+
+
+def test_demolition_cost_lookup(app_env, conn):
+    repository = app_env["app.repository"]
+
+    # 木造の地方別は出典の実測値そのまま
+    assert repository.get_demolition_cost(conn, "関東", "木造") == 35_270
+    assert repository.get_demolition_cost(conn, "中国・四国", "木造") == 29_038
+
+    # 構造が重いほど高い
+    kinki_wood = repository.get_demolition_cost(conn, "近畿", "木造")
+    kinki_rc = repository.get_demolition_cost(conn, "近畿", "鉄筋コンクリート造")
+    assert kinki_rc > kinki_wood
+
+    # 地方が不明でも全国平均で返す
+    assert repository.get_demolition_cost(conn, None, "木造") is not None
+
+
+def test_usecase_examples_prefer_same_prefecture_then_region(app_env, conn):
+    repository = app_env["app.repository"]
+
+    hiroshima = repository.pick_usecase_examples(
+        conn, prefecture="広島県", region="中国・四国", category=None, limit=4
+    )
+    assert hiroshima[0]["prefecture"] == "広島県"
+
+    # 同県が無ければ同じ地方が優先される
+    tottori = repository.pick_usecase_examples(
+        conn, prefecture="鳥取県", region="中国・四国", category=None, limit=4
+    )
+    assert tottori[0]["region"] == "中国・四国"
+
+    # 出典は必ず入っている
+    for row in hiroshima:
+        assert row["source_url"] == "https://jichitai.works/articles/3296"

@@ -60,6 +60,35 @@ CREATE TABLE IF NOT EXISTS advice_templates (
 );
 CREATE INDEX IF NOT EXISTS idx_templates_section ON advice_templates(section_id);
 
+-- 都道府県 → 地方区分。解体費用の相場が地方単位で公表されているため。
+CREATE TABLE IF NOT EXISTS prefecture_regions (
+    prefecture TEXT PRIMARY KEY,
+    region     TEXT NOT NULL
+);
+
+-- 解体費用の坪単価（円/坪）。出典ありの実データ（app/reference_data.py）。
+CREATE TABLE IF NOT EXISTS demolition_costs (
+    region         TEXT NOT NULL,
+    structure      TEXT NOT NULL,
+    cost_per_tsubo INTEGER NOT NULL,
+    PRIMARY KEY (region, structure)
+);
+
+-- 空き家活用の実例。出典ありの実データ（app/reference_data.py）。
+CREATE TABLE IF NOT EXISTS usecase_examples (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    prefecture  TEXT NOT NULL,
+    region      TEXT NOT NULL,
+    title       TEXT NOT NULL UNIQUE,
+    category    TEXT NOT NULL,
+    summary     TEXT NOT NULL,
+    numbers     TEXT,
+    source_name TEXT NOT NULL,
+    source_url  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_examples_pref ON usecase_examples(prefecture);
+CREATE INDEX IF NOT EXISTS idx_examples_region ON usecase_examples(region, category);
+
 -- 「活用例」セクションの生成結果のキャッシュ。
 -- 同じ条件で何度も LLM を呼ばないようにする。
 CREATE TABLE IF NOT EXISTS usecase_cache (
@@ -106,12 +135,14 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection | None = None) -> None:
     """スキーマ作成と初期データ投入。何度呼んでも安全。"""
+    from .reference_data import seed_reference_data
     from .seed import seed_all
 
     own = conn or connect()
     try:
         own.executescript(SCHEMA)
         seed_all(own)
+        seed_reference_data(own)
     finally:
         if conn is None:
             own.close()
@@ -120,7 +151,7 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
 def schema_is_ready(conn: sqlite3.Connection) -> bool:
     """スキーマが入っているかを 1 クエリで確かめる。"""
     row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'regions'"
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'usecase_examples'"
     ).fetchone()
     return row is not None
 

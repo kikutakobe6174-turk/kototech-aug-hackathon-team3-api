@@ -76,6 +76,10 @@ class Factors:
     hold_weight: float
     rentable: bool
 
+    # 出典ありの参照データ（app/reference_data.py）
+    region_name: str = ""
+    demolition_cost_per_tsubo: int = 0
+
 
 @dataclass(frozen=True)
 class Scores:
@@ -96,11 +100,17 @@ class Scores:
         return {"sell": self.sell, "rent": self.rent, "hold": self.hold}
 
 
+# フロント dev_simple が読む 1 本の説明文。セクションとは別扱い。
+USAGE_TEMPLATE_ID = "usage"
+
+
 @dataclass(frozen=True)
 class Diagnosis:
     recommendation: Recommendation
     scores: Scores
     sections: dict[str, str]
+    usage: str
+    context: dict[str, str]
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -206,6 +216,34 @@ def _demand_text(demand: float) -> str:
     return "低い"
 
 
+def _demolition_verdict(
+    sale_as_is: float, sale_after_demolition: float, remaining: float
+) -> str:
+    """そのまま売るのと解体して売るのの、どちらが手残りで有利かを一言で。"""
+    diff = sale_after_demolition - sale_as_is
+    if remaining >= 0.5:
+        return (
+            "建物にまだ価値が残っているため、まずは現況のまま売り出すのが基本です。"
+            "解体は買主が見つからなかったときの次の手として考えてください。"
+        )
+    if diff > 50:
+        return (
+            f"解体して更地にしたほうが約 {round(diff):,} 万円ぶん手残りが多くなる試算です。"
+            "古家付きだと買主が解体費を織り込んで指値をしてくるためです。"
+        )
+    if diff < -50:
+        return (
+            f"そのまま売るほうが約 {round(-diff):,} 万円ぶん有利な試算です。"
+            "解体費が土地の評価を上回るため、現況のまま売り出すか、"
+            "解体費を値引きに回して交渉する形が現実的です。"
+        )
+    return (
+        "そのまま売る場合と解体して売る場合で、手残りに大きな差が出ない試算です。"
+        "解体すると買主の幅は広がりますが、費用は先に自己負担になります。"
+        "まず現況で査定を取り、反応を見てから判断するのが安全です。"
+    )
+
+
 def build_context(
     detail: dict[str, Any], factors: Factors, remaining: float, scores: Scores
 ) -> dict[str, str]:
@@ -218,6 +256,7 @@ def build_context(
         "prefecture": factors.prefecture,
         "city": factors.city,
         "area": f"{factors.prefecture}{factors.city}",
+        "area_region": factors.region_name or factors.prefecture,
         "property_type_text": detail.get("property_type") or "物件",
         "structure_text": factors.structure_name,
         "legal_life": str(factors.legal_life_years),
@@ -251,6 +290,11 @@ def build_context(
         # 住宅用地特例で土地の課税標準は 1/6。固定資産税 1.4% + 都市計画税 0.3%。
         tax_year = (land_value * 0.7 / 6.0 + building_value * 0.7) * 0.017
 
+        # 解体して更地で売る場合。解体費は円/坪なので万円に直す。
+        demolition = float(tsubo) * factors.demolition_cost_per_tsubo / 10_000.0
+        # 更地は買い手が付きやすく、土地値がそのまま評価される
+        sale_after_demolition = land_value - demolition
+
         ctx.update(
             {
                 "land_value_text": _man(land_value),
@@ -259,12 +303,24 @@ def build_context(
                 "rent_text": _yen(rent_month),
                 "renovation_text": _man(renovation),
                 "tax_text": _man(tax_year),
+                "demolition_text": _man(demolition),
+                "demolition_unit_text": f"{factors.demolition_cost_per_tsubo:,}",
+                "sale_after_demolition_text": _man(max(0.0, sale_after_demolition)),
+                "demolition_verdict_text": _demolition_verdict(
+                    sale_price, sale_after_demolition, remaining
+                ),
             }
         )
     else:
         unknown = "坪数を入力すると試算します"
         ctx.update(
             {
+                "demolition_text": unknown,
+                "demolition_unit_text": f"{factors.demolition_cost_per_tsubo:,}",
+                "sale_after_demolition_text": unknown,
+                "demolition_verdict_text": (
+                    "坪数を入力すると、そのまま売る場合と解体して売る場合を比較します。"
+                ),
                 "land_value_text": unknown,
                 "building_value_text": unknown,
                 "sale_price_text": unknown,
@@ -293,6 +349,14 @@ def render_sections(
     return sections
 
 
+def render_usage(templates: dict[str, str], context: dict[str, str]) -> str:
+    """推奨アクションを取ったうえでどう活用するか、を 1 本の文章にする。"""
+    body = templates.get(USAGE_TEMPLATE_ID)
+    if not body:
+        return ""
+    return body.format_map(_Blanks(context))
+
+
 def diagnose(
     detail: dict[str, Any], factors: Factors, templates_for: Any
 ) -> Diagnosis:
@@ -305,5 +369,13 @@ def diagnose(
     scores = score(detail, factors, remaining)
     recommendation = scores.best()
     context = build_context(detail, factors, remaining, scores)
-    sections = render_sections(templates_for(recommendation), context, recommendation)
-    return Diagnosis(recommendation=recommendation, scores=scores, sections=sections)
+    templates = templates_for(recommendation)
+    sections = render_sections(templates, context, recommendation)
+    usage = render_usage(templates, context)
+    return Diagnosis(
+        recommendation=recommendation,
+        scores=scores,
+        sections=sections,
+        usage=usage,
+        context=context,
+    )

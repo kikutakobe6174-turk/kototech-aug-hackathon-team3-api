@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-# フロント `src/lib/sections.ts` の ADVICE_SECTIONS と同じ id・同じ並び。
+# dev_simple ブランチ（ienomirai_front_branch）の AdviceResult。
+# `{ recommendation, usage }` だけを読む。
+DEV_SIMPLE_KEYS = ("recommendation", "usage")
+RECOMMENDATIONS = ("sell", "rent", "hold")
+
+# master ブランチ（ienomirai_front）の sections.ts と同じ id・同じ並び。
 # ここがずれると画面がプレースホルダのままになるので、テストで固定する。
 FRONTEND_SECTION_IDS = (
     "summary",
