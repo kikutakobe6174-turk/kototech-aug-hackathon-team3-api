@@ -100,11 +100,17 @@ class Scores:
         return {"sell": self.sell, "rent": self.rent, "hold": self.hold}
 
 
+# フロント dev_simple が読む 1 本の説明文。セクションとは別扱い。
+USAGE_TEMPLATE_ID = "usage"
+
+
 @dataclass(frozen=True)
 class Diagnosis:
     recommendation: Recommendation
     scores: Scores
     sections: dict[str, str]
+    usage: str
+    context: dict[str, str]
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -343,6 +349,14 @@ def render_sections(
     return sections
 
 
+def render_usage(templates: dict[str, str], context: dict[str, str]) -> str:
+    """推奨アクションを取ったうえでどう活用するか、を 1 本の文章にする。"""
+    body = templates.get(USAGE_TEMPLATE_ID)
+    if not body:
+        return ""
+    return body.format_map(_Blanks(context))
+
+
 def diagnose(
     detail: dict[str, Any], factors: Factors, templates_for: Any
 ) -> Diagnosis:
@@ -355,5 +369,13 @@ def diagnose(
     scores = score(detail, factors, remaining)
     recommendation = scores.best()
     context = build_context(detail, factors, remaining, scores)
-    sections = render_sections(templates_for(recommendation), context, recommendation)
-    return Diagnosis(recommendation=recommendation, scores=scores, sections=sections)
+    templates = templates_for(recommendation)
+    sections = render_sections(templates, context, recommendation)
+    usage = render_usage(templates, context)
+    return Diagnosis(
+        recommendation=recommendation,
+        scores=scores,
+        sections=sections,
+        usage=usage,
+        context=context,
+    )

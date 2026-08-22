@@ -55,15 +55,16 @@ app/
   config.py       環境変数 → Settings（frozen dataclass, lru_cache）
   db.py           sqlite3 接続と SCHEMA（テーブル定義はすべてここ）
   seed.py         マスタデータ（相場・係数・本文テンプレート）※出典なしの仮値
+  usage_templates.py dev_simple 用 `usage` のテンプレート（判定ごと）
   reference_data.py 出典のある実データ（活用事例・解体費用）
   repository.py   SQL はすべてここに閉じ込める
   advice.py       採点と本文組み立て（純関数。DB にも FastAPI にも依存しない）
-  gemini.py       「活用例」の生成（Gemini Interactions API）
+  gemini.py       `usage` の生成（Gemini Interactions API）
   models.py       pydantic のリクエスト / レスポンス
   main.py         アプリ生成・エラーハンドラ・ルーター登録
   routers/
     advice.py     POST /advice, GET /advice/history, GET /regions
-tests/            72 件
+tests/            77 件
 run.py            開発用の起動スクリプト
 docs/
   DATA_SOURCES.md 相場データの出典と、実データへの差し替え手順
@@ -86,8 +87,16 @@ docs/
 
 - エンドポイントは `POST /advice`。パスは `route.ts` の `ADVICE_PATH` で決まっている。
 - リクエスト / レスポンスのキーは **snake_case のまま**。camelCase に変換しない。
-- レスポンスは `{ recommendation, sections }` の 2 キーだけ。
-  `recommendation` は `"sell" | "rent" | "hold"`。
+- **フロントは 2 系統ある。両方が読める形で返す。**
+  - `dev_simple`（`~/ienomirai_front_branch`）… `{ recommendation, usage }` を読む
+  - `master`（`~/ienomirai_front`）… `{ recommendation, sections }` を読む
+  どちらも余分なキーは無視するので、両方入れておけば片方を壊さない。
+  片方を消すときは、対応するフロントが無くなったことを確認してから。
+- `recommendation` は `"sell" | "rent" | "hold"`。
+- `usage` は 1 本の文章。画面では `whitespace-pre-wrap` で表示されるため、
+  Markdown は効かない。改行と全角記号だけで組み立てる。
+  判定ごとのテンプレートは `app/usage_templates.py`。
+  **空文字を返さないこと**（画面に何も出なくなる）。
 - `sections` のキーは `src/lib/sections.ts` の `ADVICE_SECTIONS` の id と一致させる。
   **9 セクションすべてを必ず埋める**。欠けると画面がプレースホルダのままになる。
   この並びは `advice.SECTION_IDS` と `tests/conftest.py` の

@@ -77,12 +77,19 @@ async def create_advice(
         lambda recommendation: repository.get_templates(conn, recommendation),
     )
 
+    examples = _load_examples(conn, body, factors)
     sections = dict(result.sections)
-    usecase = await _resolve_usecase(
-        conn, settings, body, detail, factors, result.scores, result.recommendation
+    # master ブランチのフロント用。実例をそのまま並べる。
+    formatted = gemini.format_examples(examples)
+    if formatted:
+        sections["usecase"] = formatted
+
+    # dev_simple ブランチのフロント用の 1 本の文章。
+    usage = await _resolve_usage(
+        conn, settings, detail, factors, result.scores, result.recommendation, examples
     )
-    if usecase:
-        sections["usecase"] = usecase
+    if not usage:
+        usage = _fallback_usage(result.usage, formatted)
 
     if settings.save_history:
         repository.save_diagnosis(
@@ -96,7 +103,9 @@ async def create_advice(
         )
         repository.trim_history(conn, settings.history_limit)
 
-    return AdviceResult(recommendation=result.recommendation, sections=sections)
+    return AdviceResult(
+        recommendation=result.recommendation, usage=usage, sections=sections
+    )
 
 
 # 判定 → 事例分類の対応。優先的に拾う分類を決めるだけで、絞り込みはしない。
@@ -120,17 +129,24 @@ def _load_examples(
     return [dict(row) for row in rows]
 
 
-async def _resolve_usecase(
+def _fallback_usage(template_body: str, formatted_examples: str) -> str:
+    """LLM が使えないときの `usage`。テンプレート文 + 実例。"""
+    parts = [
+        part for part in (template_body.strip(), formatted_examples.strip()) if part
+    ]
+    return "\n\n".join(parts)
+
+
+async def _resolve_usage(
     conn: sqlite3.Connection,
     settings: Settings,
-    request: AdviceRequest,
     detail: dict,
     factors: advice_logic.Factors,
     scores: advice_logic.Scores,
     recommendation: str,
+    examples: list[dict],
 ) -> str | None:
-    """「活用例」の本文を、キャッシュ → 生成 → 実例のそのまま表示 の順で用意する。"""
-    examples = _load_examples(conn, request, factors)
+    """`usage` の本文を、キャッシュ → 生成 の順で用意する。"""
     key = gemini.cache_key(detail, factors, recommendation, settings.gemini_model)
 
     if settings.usecase_cache_enabled:
@@ -144,14 +160,9 @@ async def _resolve_usecase(
             )
             return cached["body"]
 
-    body = await gemini.generate_usecase(
+    body = await gemini.generate_usage(
         detail, factors, scores, recommendation, examples
     )
-    if not body:
-        # LLM が使えなくても、出典のある実例はそのまま出す。
-        # advice_templates の汎用文まで落ちるのは事例が 1 件も無いときだけ。
-        return gemini.format_examples(examples) or None
-
     if body and settings.usecase_cache_enabled:
         repository.save_usecase(
             conn,

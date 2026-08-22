@@ -71,7 +71,8 @@ def test_templates_cover_every_section(app_env, conn):
 
     for recommendation in ("sell", "rent", "hold"):
         templates = repository.get_templates(conn, recommendation)
-        assert set(templates) == set(FRONTEND_SECTION_IDS), recommendation
+        # セクションに加えて、dev_simple 用の usage テンプレートも入る
+        assert set(templates) == set(FRONTEND_SECTION_IDS) | {"usage"}, recommendation
 
 
 def test_recommendation_specific_template_wins(app_env, conn):

@@ -123,7 +123,7 @@ def test_returns_none_without_api_key(app_env, factors, caplog):
 
     with caplog.at_level(logging.INFO):
         result = asyncio.run(
-            gemini.generate_usecase({}, factors(), advice.Scores(1, 2, 3), "hold")
+            gemini.generate_usage({}, factors(), advice.Scores(1, 2, 3), "hold")
         )
 
     assert result is None
@@ -144,15 +144,15 @@ def test_prepends_disclaimer_and_logs(app_env, factors, caplog, monkeypatch):
 
     with caplog.at_level(logging.INFO):
         body = asyncio.run(
-            gemini.generate_usecase(
+            gemini.generate_usage(
                 {"tsubo": 35}, factors(), advice.Scores(1, 2, 3), "rent"
             )
         )
 
-    assert body.startswith(gemini.DISCLAIMER)
     assert "週末貸しの一軒家" in body
-    assert "活用例（生成）" in caplog.text
-    # 出典はモデル任せにせず、必ずこちらで付ける
+    assert "活用方法（生成）" in caplog.text
+    # 金額の出どころの断り書きは、モデル任せにせず必ずこちらで付ける
+    assert body.rstrip().endswith(gemini.USAGE_NOTE)
     assert "出典:" not in body  # 事例を渡していないので出典行は付かない
     app_env["app.config"].get_settings.cache_clear()
 
@@ -171,7 +171,7 @@ def test_failure_returns_none_and_logs(app_env, factors, caplog, monkeypatch):
     with caplog.at_level(logging.WARNING):
         assert (
             asyncio.run(
-                gemini.generate_usecase({}, factors(), advice.Scores(1, 2, 3), "sell")
+                gemini.generate_usage({}, factors(), advice.Scores(1, 2, 3), "sell")
             )
             is None
         )
@@ -210,16 +210,39 @@ def _stub_generate(app_env, monkeypatch, text: str, calls: list[str] | None = No
     monkeypatch.setattr(gemini, "generate", fake_generate)
 
 
-def test_usecase_section_uses_generated_text(client, app_env, monkeypatch):
-    _stub_generate(app_env, monkeypatch, "■ 蔵をカフェに貸す\n  ...")
+def test_usage_uses_generated_text(client, app_env, monkeypatch):
+    """生成できたら usage に入る（dev_simple のフロントが読む値）。"""
+    _stub_generate(app_env, monkeypatch, "蔵をカフェとして貸す方法があります。")
 
     body = client.post("/advice", json=SAMPLE_REQUEST).json()
 
+    assert "蔵をカフェとして貸す方法があります。" in body["usage"]
+    assert body["usage"].rstrip().endswith(
+        app_env["app.gemini"].source_note(
+            [
+                {
+                    "source_name": "自治体通信オンライン",
+                    "source_url": "https://jichitai.works/articles/3296",
+                }
+            ]
+        ).strip()
+    )
+    # 活用例セクション（master 用）は実例のまま。生成文で上書きしない
     assert set(body["sections"]) == set(FRONTEND_SECTION_IDS)
-    usecase = body["sections"]["usecase"]
-    assert "蔵をカフェに貸す" in usecase
-    assert usecase.startswith(app_env["app.gemini"].DISCLAIMER)
+    assert "蔵をカフェ" not in body["sections"]["usecase"]
     app_env["app.config"].get_settings.cache_clear()
+
+
+def test_usage_falls_back_to_template_and_examples(client):
+    """キーが無くても usage は空にならない。テンプレート文 + 実例が入る。"""
+    body = client.post("/advice", json=SAMPLE_REQUEST).json()
+    usage = body["usage"]
+
+    assert usage.strip()
+    # 判定に応じたテンプレート文
+    assert "京都府京都市中京区" in usage
+    # 出典のある実例も続けて出す
+    assert "https://jichitai.works/articles/3296" in usage
 
 
 def test_usecase_shows_real_examples_without_key(client):

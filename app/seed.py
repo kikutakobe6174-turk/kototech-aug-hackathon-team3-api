@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from .usage_templates import ROWS as USAGE_TEMPLATE_ROWS
+
 # (都道府県, 坪単価[万円], 坪あたり月額賃料[円], 賃貸需要, 人口動態, 空き家率)
 PREFECTURE_ROWS: tuple[tuple[str, int, int, float, float, float], ...] = (
     ("北海道", 42, 4300, 0.62, -0.35, 0.13),
@@ -373,5 +375,5 @@ def seed_all(conn: sqlite3.Connection) -> None:
         VALUES (?, ?, ?)
         ON CONFLICT(section_id, recommendation) DO UPDATE SET body = excluded.body
         """,
-        TEMPLATE_ROWS,
+        TEMPLATE_ROWS + USAGE_TEMPLATE_ROWS,
     )

@@ -1,8 +1,8 @@
-"""Gemini で「活用例」セクションの本文を生成する。
+"""Gemini で `usage`（どう活用するか）の本文を生成する。
 
-フロントの `src/lib/sections.ts` にある `usecase`（活用例）に入る文章を作る。
+フロント dev_simple の `AdviceResult.usage` に入る 1 本の文章を作る。
 生成できなかったときは `advice_templates` のフォールバック文がそのまま使われるので、
-このモジュールは**例外を外に投げない**（`generate_usecase` は None を返す）。
+このモジュールは**例外を外に投げない**（`generate_usage` は None を返す）。
 
 Interactions API を使う。
   POST https://generativelanguage.googleapis.com/v1beta/interactions
@@ -48,11 +48,18 @@ SYSTEM_INSTRUCTION = (
     "- 出力は日本語のプレーンテキスト。Markdown の記法（#, *, -, ```）は使わない"
 )
 
-# 本文の先頭に必ず付ける断り書き。モデルの出力に任せず、こちらで固定する。
+# 断り書きはモデルの出力に任せず、こちらで固定して付ける。
+# 「活用例」を列挙するとき（format_examples）に使う。
 DISCLAIMER = (
     "※ 以下は全国の自治体で実際に行われた空き家活用の事例です。"
     "この物件に当てはめた場合の見通しは目安であり、"
     "実際の費用や収益は個別の条件で変わります。"
+)
+
+# `usage` の文章の末尾に付ける。金額の出どころを誤解させないため。
+USAGE_NOTE = (
+    "※ 金額はいずれも簡易モデルによる目安です。"
+    "公的な統計データとは接続していないため、実際の査定額や賃料とは差が出ます。"
 )
 
 
@@ -156,7 +163,7 @@ def build_prompt(
     reference = _format_examples_for_prompt(examples or [])
 
     return (
-        "次の空き家について、「活用例」として読ませる文章を書いてください。\n\n"
+        "次の空き家について、診断結果の下に載せる「活用方法」の文章を書いてください。\n\n"
         f"【物件の条件】\n{conditions}\n\n"
         f"【エリアの参考値】\n{area_stats}\n"
         "※ これらの参考値は簡易モデルの概算であり、公的統計の実測値ではありません。\n\n"
@@ -166,18 +173,16 @@ def build_prompt(
         "【参考事例】（実在の事例。ここに書かれた事実だけを使うこと）\n"
         f"{reference or '（該当する事例がありません）'}\n\n"
         "【依頼】\n"
-        "上の参考事例を使って、この物件に当てはめた活用例を書いてください。"
-        "参考事例の中から、この物件の条件に照らして現実的なものを 3〜4 個選びます。"
+        f"「{label}」を選んだ前提で、この空き家をどう活用するかを説明してください。\n"
+        "画面では見出しの下に 1 本の文章として表示されます。"
+        "見出し記法は使えないので、段落と改行だけで組み立ててください。\n\n"
+        "次の順番で、全体 600〜900 字程度にまとめてください。\n"
+        f"1. なぜ「{label}」が向いているのか（条件と数値を根拠に 2〜3 文）\n"
+        "2. 具体的にどう進めるか（費用や賃料の目安を添える。必ず「目安」と明記）\n"
+        "3. 参考事例のうち、この物件に近いものを 1〜2 件だけ引いて、"
+        "何が参考になるかを説明する（自治体名と数値は参考事例のとおりに引用する）\n"
+        "4. 最初の一歩（誰に何を相談するか）\n\n"
         "**参考事例に無い自治体名・施設名・数値を新しく作らないでください。**"
-        "それぞれ次の形式で、この順番どおりに書いてください。\n\n"
-        "■ 事例名（参考事例に書かれているとおりの名称）\n"
-        "  どんな取り組みか: （参考事例の事実を 2〜3 文で。数値があれば引用する）\n"
-        "  この物件との共通点: （条件のどこが近いか）\n"
-        "  当てはめるとどうなるか: （この物件でやる場合の費用・収益の目安。目安と明記）\n"
-        "  ハードル: （この物件でやる場合に引っかかりそうな点）\n"
-        "  最初の一歩: （誰に何を相談するか）\n\n"
-        "最後に「この物件で確認すべきこと」として、"
-        "判断のために追加で調べるべき項目を 3 つ、箇条書きで挙げてください。"
     )
 
 
@@ -247,7 +252,7 @@ async def generate(prompt: str) -> str:
 def _log_result(area: str, recommendation: str, model: str, text: str, source: str) -> None:
     logger.info(
         "\n"
-        "========== 活用例（%s） ==========\n"
+        "========== 活用方法（%s） ==========\n"
         "対象: %s / 判定: %s / モデル: %s\n"
         "-----------------------------------\n"
         "%s\n"
@@ -260,16 +265,16 @@ def _log_result(area: str, recommendation: str, model: str, text: str, source: s
     )
 
 
-async def generate_usecase(
+async def generate_usage(
     detail: dict[str, Any],
     factors: Factors,
     scores: Scores,
     recommendation: str,
     examples: list[dict[str, Any]] | None = None,
 ) -> str | None:
-    """「活用例」の本文を返す。生成できなければ None（呼び出し側がフォールバック）。
+    """`usage` の本文を返す。生成できなければ None（呼び出し側がフォールバック）。
 
-    ここでは例外を外へ出さない。活用例が出せないだけで診断全体を失敗させたくないため。
+    ここでは例外を外へ出さない。文章が出せないだけで診断全体を失敗させたくないため。
     """
     settings = get_settings()
     area = f"{factors.prefecture}{factors.city}"
@@ -295,7 +300,7 @@ async def generate_usecase(
         return None
 
     # 断り書きと出典はモデル任せにせず、必ずこちらで付ける。
-    body = f"{DISCLAIMER}\n\n{text}{source_note(examples or [])}"
+    body = f"{text}\n\n{USAGE_NOTE}{source_note(examples or [])}"
     _log_result(area, recommendation, settings.gemini_model, body, "生成")
     return body
 

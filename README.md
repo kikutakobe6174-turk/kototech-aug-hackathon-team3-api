@@ -129,8 +129,35 @@ Get-NetTCPConnection -LocalPort 8000 -State Listen |
 }
 ```
 
-レスポンス（`AdviceResult`）。`sections` のキーは
-`src/lib/sections.ts` の `ADVICE_SECTIONS` の id と一致する。
+レスポンス（`AdviceResult`）。**フロントに 2 系統あるので両方が読める形で返す。**
+
+| フロントのブランチ | 読むキー | ローカルの場所 |
+| --- | --- | --- |
+| `dev_simple` | `recommendation` + **`usage`** | `~/ienomirai_front_branch` |
+| `master` | `recommendation` + `sections` | `~/ienomirai_front` |
+
+どちらも余分なキーは無視するので、両方入れておけば片方を壊さない。
+
+```jsonc
+{
+  "recommendation": "rent",
+  "usage": "京都府京都市中京区のこの物件は、貸して収益を得ながら…（1 本の文章）",
+  "sections": { "summary": "…", "sell": "…", "usecase": "…" }
+}
+```
+
+### usage（dev_simple 用）
+
+見出しの下に 1 本の文章として `whitespace-pre-wrap` で表示される。
+Markdown は効かないので、改行と全角記号だけで組み立てている。
+判定ごとのテンプレートは `app/usage_templates.py`。
+
+Gemini が使える場合は、実在の活用事例を参考資料として渡して生成させる。
+使えない場合はテンプレート文 + 実例をそのまま並べる。**空になることはない。**
+
+### sections（master 用）
+
+`sections` のキーは `src/lib/sections.ts` の `ADVICE_SECTIONS` の id と一致する。
 
 ```jsonc
 {

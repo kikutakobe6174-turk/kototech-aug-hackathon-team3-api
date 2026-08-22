@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from tests.conftest import FRONTEND_SECTION_IDS, SAMPLE_REQUEST
+from tests.conftest import (
+    DEV_SIMPLE_KEYS,
+    FRONTEND_SECTION_IDS,
+    RECOMMENDATIONS,
+    SAMPLE_REQUEST,
+)
 
 
 def test_health(client):
@@ -11,16 +16,23 @@ def test_health(client):
     assert res.json()["status"] == "ok"
 
 
-def test_advice_returns_frontend_shape(client):
+def test_advice_returns_dev_simple_shape(client):
+    """dev_simple ブランチのフロントが読む形（recommendation + usage）。"""
     res = client.post("/advice", json=SAMPLE_REQUEST)
     assert res.status_code == 200, res.text
     body = res.json()
 
-    # AdviceResult = { recommendation, sections }
-    assert set(body) == {"recommendation", "sections"}
-    assert body["recommendation"] in {"sell", "rent", "hold"}
+    for key in DEV_SIMPLE_KEYS:
+        assert key in body, key
+    assert body["recommendation"] in set(RECOMMENDATIONS)
+    assert isinstance(body["usage"], str)
+    assert body["usage"].strip(), "usage が空だと画面に何も出ない"
 
-    # 画面の全セクションが埋まっていること（欠けるとプレースホルダのままになる）
+
+def test_advice_keeps_master_shape(client):
+    """master ブランチのフロントも壊さない（sections を残す）。"""
+    body = client.post("/advice", json=SAMPLE_REQUEST).json()
+
     assert set(body["sections"]) == set(FRONTEND_SECTION_IDS)
     for section_id, text in body["sections"].items():
         assert isinstance(text, str), section_id

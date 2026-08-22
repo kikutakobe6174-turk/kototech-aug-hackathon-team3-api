@@ -39,10 +39,20 @@ class AdviceRequest(BaseModel):
 
 
 class AdviceResult(BaseModel):
-    """`POST /advice` のレスポンス。フロントの `AdviceResult` と同じ形。"""
+    """`POST /advice` のレスポンス。
+
+    フロントに 2 系統あるので、両方が読める形で返す。
+
+    - dev_simple ブランチ: `{ recommendation, usage }` を読む
+    - master ブランチ:     `{ recommendation, sections }` を読む
+
+    どちらも余分なキーは無視するので、両方入れておけば片方を壊さない。
+    片方を消すときは、対応するフロントが無くなったことを確認してから。
+    """
 
     recommendation: Recommendation
-    sections: dict[str, str]
+    usage: str = ""
+    sections: dict[str, str] = Field(default_factory=dict)
 
 
 class ErrorResponse(BaseModel):
